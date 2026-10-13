@@ -1,0 +1,22 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Local config and secrets
+.env
+*.env
+!.env.example
+deploy/.env
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+
+# Web
+web/node_modules/
+web/.svelte-kit/
+web/build/
