@@ -5,11 +5,100 @@
 package sqlcgen
 
 import (
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
+
+type Attachment struct {
+	ID          int64
+	MessageID   int64
+	Ordinal     int32
+	Filename    string
+	ContentType string
+	SizeBytes   int64
+	ContentID   string
+	Inline      bool
+}
 
 type InstanceSetting struct {
 	Key       string
 	Value     string
-	UpdatedAt pgtype.Timestamptz
+	UpdatedAt time.Time
+}
+
+type Message struct {
+	ID           int64
+	ProjectID    int64
+	ReceivedAt   time.Time
+	MessageIDHdr string
+	FromAddr     string
+	Subject      string
+	SizeBytes    int64
+	TextBody     string
+	HtmlBody     string
+	Raw          []byte
+	Headers      []byte
+	ReadAt       *time.Time
+	Search       interface{}
+}
+
+type MessageLink struct {
+	MessageID int64
+	Position  int32
+	Url       string
+}
+
+type MessageRecipient struct {
+	MessageID int64
+	Kind      string
+	Address   string
+}
+
+type MessageTag struct {
+	MessageID int64
+	TagID     int64
+}
+
+type Project struct {
+	ID        int64
+	Slug      string
+	Name      string
+	CreatedAt time.Time
+}
+
+type SmtpCredential struct {
+	ID         int64
+	ProjectID  int64
+	Username   string
+	SecretHmac []byte
+	Label      string
+	CreatedAt  time.Time
+	RevokedAt  *time.Time
+	LastUsedAt *time.Time
+}
+
+type Tag struct {
+	ID        int64
+	ProjectID int64
+	Name      string
+}
+
+type TagRule struct {
+	ID         int64
+	ProjectID  int64
+	Kind       string
+	HeaderName string
+	Pattern    string
+	Tag        string
+	CreatedAt  time.Time
+}
+
+type User struct {
+	ID                 int64
+	Email              string
+	Name               string
+	PasswordHash       string
+	IsAdmin            bool
+	MustChangePassword bool
+	CreatedAt          time.Time
+	DisabledAt         *time.Time
 }

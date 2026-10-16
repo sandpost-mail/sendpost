@@ -9,6 +9,8 @@ make dev       # local Postgres and server
 make test
 make lint
 make web-check
+make web       # build the UI into internal/webui/dist (embedded by go:embed, not committed)
+make web-dev   # Vite hot reload on :5173, proxies the API from `make dev`
 ```
 
 Tools: Go, Docker (integration tests use Testcontainers, or set `TEST_DATABASE_URL` to a Postgres where the user can create databases), golangci-lint v2, sqlc, Node 22+.

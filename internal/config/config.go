@@ -25,6 +25,18 @@ const (
 	logFormatJSON                = "json"
 )
 
+// SMTP TLS modes (SMTP_TLS_MODE).
+const (
+	// TLSOff serves plaintext SMTP only.
+	TLSOff = "off"
+	// TLSStartTLS offers STARTTLS, plaintext AUTH stays allowed.
+	TLSStartTLS = "starttls"
+	// TLSRequired offers STARTTLS and refuses AUTH before TLS.
+	TLSRequired = "required"
+	// TLSImplicit wraps the whole connection in TLS (SMTPS).
+	TLSImplicit = "implicit"
+)
+
 // Config is the validated, immutable runtime configuration.
 type Config struct {
 	DatabaseURL     string
@@ -33,6 +45,7 @@ type Config struct {
 	HTTPListen      string
 	TLSCertFile     string
 	TLSKeyFile      string
+	SMTPTLSMode     string
 	AdminEmail      string
 	AdminPassword   string
 	MaxMessageBytes int64
@@ -46,6 +59,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("SMTPListen", c.SMTPListen),
 		slog.String("HTTPListen", c.HTTPListen),
 		slog.Bool("TLS", c.TLSCertFile != ""),
+		slog.String("SMTPTLSMode", c.SMTPTLSMode),
 		slog.Bool("AdminBootstrap", c.AdminEmail != ""),
 		slog.Int64("MaxMessageBytes", c.MaxMessageBytes),
 		slog.String("LogLevel", c.LogLevel.String()),
@@ -86,6 +100,7 @@ func build(get func(string) string) (Config, error) {
 		HTTPListen:      orDefault(get("HTTP_LISTEN"), DefaultHTTPListen),
 		TLSCertFile:     get("TLS_CERT_FILE"),
 		TLSKeyFile:      get("TLS_KEY_FILE"),
+		SMTPTLSMode:     strings.ToLower(get("SMTP_TLS_MODE")),
 		AdminEmail:      get("ADMIN_EMAIL"),
 		AdminPassword:   get("ADMIN_PASSWORD"),
 		MaxMessageBytes: DefaultMaxMessageBytes,
@@ -111,6 +126,22 @@ func build(get func(string) string) (Config, error) {
 		errs = append(errs, errors.New("TLS_CERT_FILE and TLS_KEY_FILE must be set together"))
 	}
 	errs = append(errs, validateAdmin(c)...)
+
+	if c.SMTPTLSMode == "" {
+		c.SMTPTLSMode = TLSOff
+		if c.TLSCertFile != "" {
+			c.SMTPTLSMode = TLSStartTLS
+		}
+	}
+	switch c.SMTPTLSMode {
+	case TLSOff:
+	case TLSStartTLS, TLSRequired, TLSImplicit:
+		if c.TLSCertFile == "" {
+			errs = append(errs, fmt.Errorf("SMTP_TLS_MODE=%s needs TLS_CERT_FILE and TLS_KEY_FILE", c.SMTPTLSMode))
+		}
+	default:
+		errs = append(errs, errors.New("SMTP_TLS_MODE must be one of off, starttls, required, implicit"))
+	}
 
 	if raw := get("MAX_MESSAGE_BYTES"); raw != "" {
 		n, err := strconv.ParseInt(raw, 10, 64)

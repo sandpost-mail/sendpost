@@ -62,8 +62,11 @@ func TestMigrateAndQueries(t *testing.T) {
 	if err := store.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	if _, err := q.GetSetting(ctx, "k"); err == nil {
-		t.Fatal("table should be gone after down")
+	if _, err := pool.Exec(ctx, "SELECT 1 FROM users"); err == nil {
+		t.Fatal("users table should be gone after rolling back the latest migration")
+	}
+	if got, err := q.GetSetting(ctx, "k"); err != nil || got != "two" {
+		t.Fatalf("older migrations must stay applied: %q %v", got, err)
 	}
 }
 
@@ -82,5 +85,32 @@ func TestMigrateErrorsOnClosedPool(t *testing.T) {
 	}
 	if _, err := store.MigrationStatuses(ctx, pool); err == nil {
 		t.Error("status on closed pool should fail")
+	}
+}
+
+func TestViolationHelpers(t *testing.T) {
+	ctx := context.Background()
+	pool, err := store.Connect(ctx, testutil.PostgresDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := store.MigrateUp(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	q := sqlcgen.New(pool)
+	if _, err := q.CreateProject(ctx, sqlcgen.CreateProjectParams{Slug: "a", Name: "A"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = q.CreateProject(ctx, sqlcgen.CreateProjectParams{Slug: "a", Name: "A again"})
+	if !store.IsUniqueViolation(err) || store.IsForeignKeyViolation(err) {
+		t.Errorf("duplicate slug: %v", err)
+	}
+	_, err = q.CreateCredential(ctx, sqlcgen.CreateCredentialParams{ProjectID: 999, Username: "u", SecretHmac: []byte{1}})
+	if !store.IsForeignKeyViolation(err) || store.IsUniqueViolation(err) {
+		t.Errorf("missing project: %v", err)
+	}
+	if store.IsUniqueViolation(errors.New("plain")) || store.IsForeignKeyViolation(nil) {
+		t.Error("non database errors are not violations")
 	}
 }

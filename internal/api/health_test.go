@@ -21,7 +21,7 @@ func get(h http.Handler, path string) *httptest.ResponseRecorder {
 }
 
 func TestHealthz(t *testing.T) {
-	h := api.NewHandler(pinger(func(context.Context) error { return errors.New("down") }))
+	h := api.NewHandler(api.Deps{DB: pinger(func(context.Context) error { return errors.New("down") })})
 	if rec := get(h, "/healthz"); rec.Code != http.StatusOK {
 		t.Fatalf("healthz must not depend on the database, got %d", rec.Code)
 	}
@@ -38,7 +38,7 @@ func TestReadyz(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := api.NewHandler(pinger(func(context.Context) error { return tt.err }))
+			h := api.NewHandler(api.Deps{DB: pinger(func(context.Context) error { return tt.err })})
 			rec := get(h, "/readyz")
 			if rec.Code != tt.want {
 				t.Fatalf("got %d want %d", rec.Code, tt.want)
@@ -51,7 +51,7 @@ func TestReadyz(t *testing.T) {
 }
 
 func TestUnknownRoute(t *testing.T) {
-	h := api.NewHandler(pinger(func(context.Context) error { return nil }))
+	h := api.NewHandler(api.Deps{DB: pinger(func(context.Context) error { return nil })})
 	if rec := get(h, "/nope"); rec.Code != http.StatusNotFound {
 		t.Fatalf("got %d", rec.Code)
 	}

@@ -1,0 +1,6 @@
+From: news@example.test
+To: reader@example.test
+Subject: HTML only
+Content-Type: text/html; charset=utf-8
+
+<html><body><h1>Headline</h1><p>Read <a href="https://example.test/article">the article</a></p></body></html>

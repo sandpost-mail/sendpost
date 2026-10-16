@@ -7,7 +7,8 @@ import (
 
 const adminUsage = `Usage: sandpost admin <task>
 
-Administrative tasks (create-user, reset-password, ...) arrive with M1.8 and M2.
+Administrative tasks (create-user, reset-password, ...) arrive with M2.
+The first admin is created on boot from ADMIN_EMAIL and ADMIN_PASSWORD.
 `
 
 // runAdmin is a placeholder for the admin subcommand tree.

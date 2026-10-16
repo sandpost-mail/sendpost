@@ -95,6 +95,14 @@ Rules the engine enforces:
 - Views: project switcher, inbox list with search and filters, message detail (HTML, text, source, headers, attachments, links), live updates, comments, message permalink, project settings (credentials, policy, tokens), admin (users, groups, audit).
 - The HTML preview renders in a sandboxed iframe with a strict CSP, and remote content is blocked by default.
 
+### M1 implementation notes
+- HTTP routing uses the standard library `ServeMux` (Go 1.22 patterns), not chi, until a need appears.
+- `messages.search` is a generated tsvector over the body only (truncated to 200k characters, `simple` config). Subject, sender and recipients use `pg_trgm` GIN indexes with ILIKE.
+- Attachment rows hold metadata and an `ordinal`. Bytes are re-parsed from `raw` on download.
+- The event bus keeps one dedicated connection per replica, LISTENs on `sp_msg_<projectID>` only while a local subscriber exists, and sends `resync` after a reconnect. `NOTIFY` is issued inside the ingest transaction, so it fires only on commit.
+- The SPA is built into `internal/webui/dist` (placeholder only in git) and embedded. The HTML preview is served by `/_/api/v1/projects/{id}/messages/{id}/html` with a sandbox CSP (no scripts, remote images blocked).
+- Until M2 the native API is unauthenticated. M2.3 must move every query behind the project scoped repository and add auth; note that images in the sandboxed (opaque origin) preview will not carry session cookies, so inline attachment URLs will need signing or another scheme.
+
 ## 3. Data model (Postgres)
 
 ```
