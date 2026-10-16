@@ -10,6 +10,7 @@ Requirements: Go (see `go.mod`), Docker, Node 22 or later for the web app.
 
 ```
 make dev        # builds the UI, Postgres in Docker, migrations, server on :8080 (SMTP :1025)
+make dev-nodb   # same without Docker: needs DATABASE_URL pointing at your own Postgres
 make test       # unit and integration tests (integration tests need Docker)
 make lint
 ```

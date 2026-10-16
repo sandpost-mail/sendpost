@@ -2,10 +2,10 @@ SHELL := /bin/sh
 BIN := bin/sandpost
 COMPOSE := docker compose -f deploy/docker-compose.yml --env-file deploy/.env
 
-.PHONY: help build test lint migrate dev sqlc seed web web-dev web-check docker-build clean
+.PHONY: help build test lint migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean
 
 help:
-	@echo "targets: build test lint migrate dev sqlc seed web web-dev web-check docker-build clean"
+	@echo "targets: build test lint migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean"
 
 # Build the UI and embed it (internal/webui/dist) in the binary.
 build: web
@@ -47,9 +47,16 @@ deploy/.env:
 
 # Start Postgres in Docker, migrate, and run the server locally.
 dev: deploy/.env web
-	$(COMPOSE) up -d --wait db
+	# $(COMPOSE) up -d --wait db
 	set -a; . deploy/.env; set +a; \
 	export DATABASE_URL="postgres://sandpost:$$POSTGRES_PASSWORD@127.0.0.1:$${POSTGRES_PORT:-5432}/sandpost?sslmode=disable"; \
+	go run ./cmd/sandpost migrate up && go run ./cmd/sandpost serve
+
+# Run the server against an external Postgres (no Docker). Requires DATABASE_URL;
+# SECRET_KEY comes from deploy/.env (created if missing).
+dev-nodb: deploy/.env web
+	@test -n "$$DATABASE_URL" || { echo "DATABASE_URL is required, e.g. postgres://user:pass@host:5432/db?sslmode=disable"; exit 1; }
+	set -a; . deploy/.env; set +a; \
 	go run ./cmd/sandpost migrate up && go run ./cmd/sandpost serve
 
 seed:
