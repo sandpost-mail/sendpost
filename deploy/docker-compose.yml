@@ -9,6 +9,8 @@ x-app-env: &app-env
   HTTP_LISTEN: ":8080"
   SMTP_LISTEN: ":1025"
   LOG_FORMAT: text
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
 
 services:
   db:

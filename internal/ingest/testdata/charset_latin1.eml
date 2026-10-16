@@ -1,0 +1,9 @@
+From: =?ISO-8859-1?Q?Andr=E9_Dupont?= <andre@example.test>
+To: x@example.test
+Subject: =?UTF-8?B?Q2Fmw6kgcsOpc3Vtw6k=?= =?ISO-8859-1?Q?_cr=E8me?=
+Message-ID: <latin1@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=ISO-8859-1
+Content-Transfer-Encoding: 8bit
+
+Café crème brûlée

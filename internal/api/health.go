@@ -14,10 +14,7 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
-// NewHandler returns the HTTP handler exposing /healthz (liveness) and
-// /readyz (readiness, checks the database).
-func NewHandler(db Pinger) http.Handler {
-	mux := http.NewServeMux()
+func registerHealth(mux *http.ServeMux, db Pinger) {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeText(w, http.StatusOK, "ok")
 	})
@@ -30,7 +27,6 @@ func NewHandler(db Pinger) http.Handler {
 		}
 		writeText(w, http.StatusOK, "ready")
 	})
-	return mux
 }
 
 func writeText(w http.ResponseWriter, status int, body string) {

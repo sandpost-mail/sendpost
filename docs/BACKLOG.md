@@ -31,6 +31,8 @@ Derived from [PRD.md](./PRD.md) and [ARCHITECTURE.md](./ARCHITECTURE.md). Each i
 
 Exit criteria: an app can send through authenticated SMTP and a developer sees the message live in the UI.
 
+Status: 1.1 to 1.11 implemented (see ARCHITECTURE, M1 implementation notes). Interim: no authentication on the native API until M2.
+
 ## M2. Access control
 
 | ID | Item | Size |

@@ -1,0 +1,19 @@
+From: shop@example.test
+To: buyer@example.test
+Subject: Your order
+Message-ID: <alt-1@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="ALT"
+
+--ALT
+Content-Type: text/plain; charset=utf-8
+
+Confirm: https://example.test/confirm?x=1
+Plain only: https://example.test/plain-only
+--ALT
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Hi</p><a href="https://example.test/confirm?x=1">Confirm</a>
+<a href="mailto:support@example.test">Support</a><a href="javascript:alert(1)">bad</a>
+<a href="/relative">rel</a></body></html>
+--ALT--

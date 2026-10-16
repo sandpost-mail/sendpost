@@ -77,7 +77,7 @@ func TestMigrateAndServe(t *testing.T) {
 
 	for _, step := range []struct{ arg, want string }{
 		{"status", "pending"},
-		{"up", "applied 1 migration(s)"},
+		{"up", "applied 3 migration(s)"},
 		{"status", "applied"},
 		{"down", "rolled back"},
 		{"up", "applied 1 migration(s)"},
@@ -93,6 +93,7 @@ func TestMigrateAndServe(t *testing.T) {
 
 	addr := freeAddr(t)
 	vars["HTTP_LISTEN"] = addr
+	vars["SMTP_LISTEN"] = freeAddr(t)
 	e, _, errb := testEnv(vars)
 	sctx, cancel := context.WithCancel(ctx)
 	done := make(chan int, 1)
@@ -123,6 +124,7 @@ func TestServeListenError(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 	e, _, errb := testEnv(map[string]string{
 		"DATABASE_URL": dsn, "SECRET_KEY": testKey, "HTTP_LISTEN": ln.Addr().String(),
+		"SMTP_LISTEN": freeAddr(t),
 	})
 	if code := run(context.Background(), e, []string{"serve"}); code != exitError {
 		t.Fatalf("code %d", code)

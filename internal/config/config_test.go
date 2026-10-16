@@ -55,6 +55,43 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name: "tls mode defaults to off without a certificate",
+			env:  base(),
+			check: func(t *testing.T, c Config) {
+				if c.SMTPTLSMode != TLSOff {
+					t.Errorf("mode %q", c.SMTPTLSMode)
+				}
+			},
+		},
+		{
+			name: "tls mode defaults to starttls with a certificate",
+			env:  with(base(), "TLS_CERT_FILE", "c.pem", "TLS_KEY_FILE", "k.pem"),
+			check: func(t *testing.T, c Config) {
+				if c.SMTPTLSMode != TLSStartTLS {
+					t.Errorf("mode %q", c.SMTPTLSMode)
+				}
+			},
+		},
+		{
+			name: "explicit implicit tls",
+			env:  with(base(), "TLS_CERT_FILE", "c.pem", "TLS_KEY_FILE", "k.pem", "SMTP_TLS_MODE", "IMPLICIT"),
+			check: func(t *testing.T, c Config) {
+				if c.SMTPTLSMode != TLSImplicit {
+					t.Errorf("mode %q", c.SMTPTLSMode)
+				}
+			},
+		},
+		{
+			name:    "tls mode without certificate",
+			env:     with(base(), "SMTP_TLS_MODE", "required"),
+			wantErr: []string{"SMTP_TLS_MODE=required needs TLS_CERT_FILE"},
+		},
+		{
+			name:    "unknown tls mode",
+			env:     with(base(), "SMTP_TLS_MODE", "maybe"),
+			wantErr: []string{"SMTP_TLS_MODE must be one of"},
+		},
+		{
 			name:    "missing everything",
 			env:     map[string]string{},
 			wantErr: []string{"DATABASE_URL is required", "SECRET_KEY is required"},

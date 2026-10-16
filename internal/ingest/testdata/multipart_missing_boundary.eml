@@ -1,0 +1,6 @@
+From: a@example.test
+To: b@example.test
+Subject: Broken multipart
+Content-Type: multipart/mixed
+
+no boundary here
