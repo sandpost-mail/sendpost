@@ -22,3 +22,5 @@ internal/webui/dist/*
 web/node_modules/
 web/.svelte-kit/
 web/build/
+.playwright-mcp/console-2026-10-14T20-19-53-750Z.log
+.serena/

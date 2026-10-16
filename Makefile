@@ -53,10 +53,10 @@ dev: deploy/.env web
 	go run ./cmd/sandpost migrate up && go run ./cmd/sandpost serve
 
 # Run the server against an external Postgres (no Docker). Requires DATABASE_URL;
-# SECRET_KEY comes from deploy/.env (created if missing).
+# SECRET_KEY and DATABASE_URL come from deploy/.env (created if missing) or the environment.
 dev-nodb: deploy/.env web
-	@test -n "$$DATABASE_URL" || { echo "DATABASE_URL is required, e.g. postgres://user:pass@host:5432/db?sslmode=disable"; exit 1; }
 	set -a; . deploy/.env; set +a; \
+	test -n "$$DATABASE_URL" || { echo "DATABASE_URL is required (environment or deploy/.env), e.g. postgres://user:pass@host:5432/db?sslmode=disable"; exit 1; }; \
 	go run ./cmd/sandpost migrate up && go run ./cmd/sandpost serve
 
 seed:
