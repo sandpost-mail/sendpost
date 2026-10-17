@@ -35,7 +35,7 @@ Environment variables, optionally preloaded from a `KEY=VALUE` file named by `SA
 | `HTTP_LISTEN` | no | `:8080` | |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | no | | set both or neither |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | no | | first boot bootstrap, set both or neither. Creates an admin (password change required at first login) only when there are no users yet, never overwrites |
-| `COOKIE_SECURE` | no | `false` | `true` marks the UI session cookie `Secure` (and uses the `__Host-` cookie name). Set it whenever users reach the UI over HTTPS, including behind a TLS terminating proxy |
+| `COOKIE_SECURE` | no | `true` | marks the UI session cookie `Secure` and uses the `__Host-` cookie name. Works over HTTPS (also behind a TLS terminating proxy) and on `http://localhost` in Chrome and Firefox. Set `false` only for plain http on another host name (for example a LAN address) or Safari on localhost. `make dev` and `make dev-nodb` default it to `false` |
 | `MAX_MESSAGE_BYTES` | no | 26214400 | |
 | `SMTP_TLS_MODE` | no | `off`, or `starttls` when a certificate is set | `off`, `starttls` (plaintext AUTH still allowed), `required` (AUTH only after STARTTLS), `implicit` (TLS from the first byte). Anything but `off` needs the certificate |
 | `LOG_LEVEL`, `LOG_FORMAT` | no | `info`, `text` | format is `text` or `json` |
@@ -63,6 +63,8 @@ Every native API route except login and the signed preview URLs needs authentica
 - A project you have no role on answers 404, exactly like a project that does not exist. A visible project where your role is too low answers 403.
 - Admin actions are recorded in an audit log: `GET /_/api/v1/audit` for admins, `GET /_/api/v1/projects/{id}/audit` for project owners.
 
+Plain http note: with the default `COOKIE_SECURE=true` the session cookie is only stored by clients that treat the origin as secure, which includes `http://localhost` in Chrome, Firefox and recent curl, but not Safari or `http://<lan-address>`. Use HTTPS, or set `COOKIE_SECURE=false` for such setups.
+
 ```
 curl -c jar -H 'Content-Type: application/json' -d '{"email":"admin@example.com","password":"..."}' localhost:8080/_/api/v1/auth/login
 curl -b jar -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"Shop"}' localhost:8080/_/api/v1/projects
@@ -71,6 +73,20 @@ curl -b jar -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"n
 ## Commands
 
 `sandpost serve`, `sandpost migrate [up|down|status]`, `sandpost admin`.
+
+### Account recovery (`sandpost admin`)
+
+Run on the server with direct database access (`DATABASE_URL` and `SECRET_KEY`, loaded like `serve`), with Docker Compose `docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec app /sandpost admin ...` (add `-T` when piping a password with `--password-stdin`). This is how a locked out last administrator recovers.
+
+| Command | Effect |
+|---|---|
+| `sandpost admin list-users` | list users (id, email, admin, disabled, must change password) |
+| `sandpost admin create-admin <email> [--name N]` | create an administrator, password change required at first login |
+| `sandpost admin reset-password <email>` | set a new password, require a change at next login, end all of the user's sessions |
+| `sandpost admin unlock <email>` | enable a disabled user (clears `disabled_at`) |
+| `sandpost admin promote <email>` | make the user an administrator |
+
+Passwords are read from a prompt without echo (asked twice), or from the first line of stdin with `--password-stdin`, never from arguments. Example: `printf '%s\n' "$NEW_PASSWORD" | sandpost admin reset-password a@example.com --password-stdin`. Every change is written to the audit log with no user actor and `"actor": "cli"` in its detail. Login rate limits are kept in memory only, so they are not stored in the database: restart the server to clear them.
 
 ## License
 

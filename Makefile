@@ -50,11 +50,14 @@ deploy/.env:
 	@printf 'SECRET_KEY=%s\nPOSTGRES_PASSWORD=sandpost\n' "$$(openssl rand -hex 32)" > $@
 	@echo "created $@ with a random SECRET_KEY"
 
-# Start Postgres in Docker, migrate, and run the server locally.
+# Start Postgres in Docker, migrate, and run the server locally. The dev targets
+# default COOKIE_SECURE to false (plain http, works in every browser and on LAN
+# addresses); set COOKIE_SECURE=true in the environment to test the Secure cookie.
 dev: deploy/.env web
 	# $(COMPOSE) up -d --wait db
 	set -a; . deploy/.env; set +a; \
 	export DATABASE_URL="postgres://sandpost:$$POSTGRES_PASSWORD@127.0.0.1:$${POSTGRES_PORT:-5432}/sandpost?sslmode=disable"; \
+	export COOKIE_SECURE="$${COOKIE_SECURE:-false}"; \
 	go run ./cmd/sandpost migrate up && go run ./cmd/sandpost serve
 
 # Run the server against an external Postgres (no Docker). Requires DATABASE_URL;
@@ -62,6 +65,7 @@ dev: deploy/.env web
 dev-nodb: deploy/.env web
 	set -a; . deploy/.env; set +a; \
 	test -n "$$DATABASE_URL" || { echo "DATABASE_URL is required (environment or deploy/.env), e.g. postgres://user:pass@host:5432/db?sslmode=disable"; exit 1; }; \
+	export COOKIE_SECURE="$${COOKIE_SECURE:-false}"; \
 	go run ./cmd/sandpost migrate up && go run ./cmd/sandpost serve
 
 seed:

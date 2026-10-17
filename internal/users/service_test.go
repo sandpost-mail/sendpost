@@ -45,6 +45,20 @@ func TestCreateValidation(t *testing.T) {
 	}
 }
 
+func TestGetByEmail(t *testing.T) {
+	pool := testutil.Pool(t)
+	svc := users.NewService(pool)
+	ctx := context.Background()
+	id := testutil.User(t, pool, "Mixed@Example.test", false)
+	got, err := svc.GetByEmail(ctx, " mixed@example.TEST ")
+	if err != nil || got.ID != id || got.Email != "Mixed@Example.test" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if _, err := svc.GetByEmail(ctx, "nobody@example.test"); !errors.Is(err, users.ErrNotFound) {
+		t.Errorf("unknown email: %v", err)
+	}
+}
+
 func TestUpdateAndLastAdmin(t *testing.T) {
 	pool := testutil.Pool(t)
 	svc := users.NewService(pool)

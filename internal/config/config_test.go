@@ -247,7 +247,7 @@ func TestCookieSecure(t *testing.T) {
 		want    bool
 		wantErr bool
 	}{
-		{"", false, false},
+		{"", true, false},
 		{"true", true, false},
 		{"1", true, false},
 		{"false", false, false},

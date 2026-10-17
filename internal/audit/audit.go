@@ -13,7 +13,23 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
 
-type actorKey struct{}
+type (
+	actorKey  struct{}
+	sourceKey struct{}
+)
+
+// WithSource returns a context whose audit entries record where the action
+// came from (for example "cli") as "actor" in their detail. It is meant for
+// actions without a user actor.
+func WithSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, sourceKey{}, source)
+}
+
+// Source returns the source attributed to ctx, false when there is none.
+func Source(ctx context.Context) (string, bool) {
+	s, ok := ctx.Value(sourceKey{}).(string)
+	return s, ok && s != ""
+}
 
 // WithActor returns a context whose audit entries are attributed to userID.
 func WithActor(ctx context.Context, userID int64) context.Context {
@@ -38,9 +54,12 @@ type Entry struct {
 
 // Record writes e using q, normally a transaction bound Queries.
 func Record(ctx context.Context, q *sqlcgen.Queries, e Entry) error {
-	detail := e.Detail
-	if detail == nil {
-		detail = map[string]any{}
+	detail := make(map[string]any, len(e.Detail)+1)
+	for k, v := range e.Detail {
+		detail[k] = v
+	}
+	if src, ok := Source(ctx); ok {
+		detail["actor"] = src
 	}
 	raw, err := json.Marshal(detail)
 	if err != nil {
