@@ -1,37 +1,25 @@
-import { ApiError } from './api';
-import type { Assignment, User } from './types';
+import type { Role } from './types';
 
 /** What the current user may do in one project, as far as the UI needs to know. */
 export interface ProjectAccess {
+  role: Role;
   /** Can manage credentials, tokens, tag rules, group roles and see the project audit. */
   owner: boolean;
+  /** Can delete, tag and comment on messages (messages.write). Viewers can still read and mark read. */
+  canWrite: boolean;
 }
 
-interface GroupsApi {
-  listProjectGroups: (projectId: number) => Promise<Assignment[]>;
+const ROLES: readonly Role[] = ['viewer', 'member', 'owner'];
+
+/** Whether a value from the API is a project role this UI knows. */
+export function isRole(value: unknown): value is Role {
+  return typeof value === 'string' && (ROLES as readonly string[]).includes(value);
 }
 
 /**
- * The API does not return the effective role, so it is derived. Instance
- * administrators are owners everywhere. For everyone else the owner only
- * endpoint `GET /projects/{id}/groups` answers 200 for owners and 403 for
- * viewers and members (who differ only in `messages.write`, which this UI does
- * not use yet). The server enforces every action either way, this only decides
- * what to show.
+ * Maps the effective role the API returns on a project to UI capabilities.
+ * The server enforces every action either way, this only decides what to show.
  */
-export async function projectAccess(
-  api: GroupsApi,
-  user: Pick<User, 'is_admin'> | null,
-  projectId: number
-): Promise<ProjectAccess> {
-  if (user?.is_admin) return { owner: true };
-  try {
-    await api.listProjectGroups(projectId);
-    return { owner: true };
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 403 && e.code !== 'password_change_required') {
-      return { owner: false };
-    }
-    throw e;
-  }
+export function accessFor(role: Role): ProjectAccess {
+  return { role, owner: role === 'owner', canWrite: role === 'member' || role === 'owner' };
 }

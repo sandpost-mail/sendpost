@@ -1,10 +1,14 @@
 // Shapes returned by the Sandpost native API (/_/api/v1).
 
+export type Role = 'viewer' | 'member' | 'owner';
+
 export interface Project {
   id: number;
   slug: string;
   name: string;
   created_at: string;
+  /** The caller's effective role on the project. Instance administrators are owners. */
+  role: Role;
 }
 
 export interface ServerInfo {
@@ -93,8 +97,6 @@ export interface TagRuleInput {
 }
 
 export type LiveEventType = 'ready' | 'message.created' | 'resync';
-
-export type Role = 'viewer' | 'member' | 'owner';
 
 export interface User {
   id: number;
