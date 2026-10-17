@@ -1,30 +1,29 @@
-import { describe, expect, it, vi } from 'vitest';
-import { projectAccess } from './access';
-import { ApiError } from './api';
+import { describe, expect, it } from 'vitest';
+import { accessFor, isRole } from './access';
+import type { Role } from './types';
 
-describe('projectAccess', () => {
-  it('makes administrators owners without asking the API', async () => {
-    const api = { listProjectGroups: vi.fn() };
-    expect(await projectAccess(api, { is_admin: true }, 1)).toEqual({ owner: true });
-    expect(api.listProjectGroups).not.toHaveBeenCalled();
+describe('accessFor', () => {
+  const cases: Array<[Role, { owner: boolean; canWrite: boolean }]> = [
+    ['viewer', { owner: false, canWrite: false }],
+    ['member', { owner: false, canWrite: true }],
+    ['owner', { owner: true, canWrite: true }]
+  ];
+
+  it.each(cases)('maps %s', (role, want) => {
+    expect(accessFor(role)).toEqual({ role, ...want });
   });
 
-  it('detects owners by the owner only endpoint', async () => {
-    const api = { listProjectGroups: vi.fn().mockResolvedValue([]) };
-    expect(await projectAccess(api, { is_admin: false }, 3)).toEqual({ owner: true });
-    expect(api.listProjectGroups).toHaveBeenCalledWith(3);
+  it('never grants more than the role says', () => {
+    expect(accessFor('viewer').owner).toBe(false);
+    expect(accessFor('member').owner).toBe(false);
   });
+});
 
-  it('treats a 403 as not owner', async () => {
-    const api = { listProjectGroups: vi.fn().mockRejectedValue(new ApiError(403, 'forbidden')) };
-    expect(await projectAccess(api, { is_admin: false }, 3)).toEqual({ owner: false });
-  });
-
-  it('rethrows other failures, including a pending password change', async () => {
-    const fail = (e: Error) => ({ listProjectGroups: vi.fn().mockRejectedValue(e) });
-    await expect(projectAccess(fail(new ApiError(404, 'gone')), null, 1)).rejects.toThrow('gone');
-    await expect(
-      projectAccess(fail(new ApiError(403, 'change', 'password_change_required')), null, 1)
-    ).rejects.toThrow('change');
+describe('isRole', () => {
+  it('accepts the three project roles only', () => {
+    expect(['viewer', 'member', 'owner'].every(isRole)).toBe(true);
+    expect(isRole('admin')).toBe(false);
+    expect(isRole('')).toBe(false);
+    expect(isRole(undefined)).toBe(false);
   });
 });
