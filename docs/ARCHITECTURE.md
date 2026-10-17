@@ -132,7 +132,15 @@ API shape for the UI (item 2.8)
 - Lists are `{items: [...]}`, paged lists (messages, audit) add `next_cursor` (empty on the last page).
 - Secrets (SMTP credential secret, token secret) appear only in the creation response.
 - The OpenAPI document is `docs/openapi.yaml`. It is hand written, `make openapi` (and the `openapi` CI job) checks it against the registered routes and lints it.
-- Known gap: the SPA still sends no credentials, so until 2.8 the web UI can not be used against an authenticated server. Use the API with a bearer token, or `curl` with a login cookie.
+- The SPA implements this (item 2.8), see the M2 UI notes below.
+
+M2 UI notes (item 2.8)
+- Session: the root `+layout.ts` calls `GET /auth/me` once per page load (`SessionStore`, `lib/session.svelte.ts`), keeps the CSRF token in memory only, and redirects with the pure rule in `lib/guard.ts`: anonymous goes to `/login?next=...`, a pending password change goes to `/change-password`. The root layout re-applies the rule reactively, so an expired session, a sign out elsewhere or a `password_change_required` answer from any call moves the user without a reload. Child loads call `await parent()` so nothing runs unauthenticated.
+- `lib/api.ts` sends cookies (`same-origin`) and `X-CSRF-Token` on every non GET, exposes `ApiError.code`, and reports 401, `password_change_required` and `csrf_invalid` to hooks wired in the session store (401 signs out locally, `csrf_invalid` refetches the token). Login and `me` handle their own 401.
+- The API returns no effective role, so the UI derives what it needs (`lib/access.ts`): administrators are owners everywhere, others are owners when `GET /projects/{id}/groups` answers 200 (owner only) and non owners on 403. Viewer and member are not distinguished (they differ only in `messages.write`, which the UI does not use yet). Owners see Settings and Audit for the project, others only the inbox. Admin pages and project creation are admin only. The server enforces everything, hiding is for usability. A non owner's project load shows one expected 403 in the browser console from that probe.
+- Signed preview: the message page fetches `GET .../preview-url` when the HTML tab opens and uses the returned URL as the iframe `src`. Attachment and raw downloads are plain links (the cookie is sent). The SSE stream uses the cookie, and a closed stream triggers a session check.
+- Owners without `groups.manage` cannot list groups, so the project Access section lets them assign a group by numeric id, administrators get a select.
+- Tests: Vitest with jsdom and Testing Library (`cd web && npm test`, run in the CI web job). Covered: API client, guard, validation, access derivation, session store, login, password and token components.
 
 Decisions taken here (revisit if needed)
 - Marking a message read is a `messages.read` capability, so viewers can do it (it is shared state, but a read only role would make opening a message fail).

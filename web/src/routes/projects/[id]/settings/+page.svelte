@@ -1,6 +1,9 @@
 <script lang="ts">
   import { api, errorMessage } from '$lib/api';
   import EnvSnippet from '$lib/components/EnvSnippet.svelte';
+  import ProjectAccess from '$lib/components/ProjectAccess.svelte';
+  import TokenManager from '$lib/components/TokenManager.svelte';
+  import { session } from '$lib/session.svelte';
   import { fullDate, relativeTime } from '$lib/format';
   import type { Credential, IssuedCredential, TagRule } from '$lib/types';
 
@@ -189,6 +192,19 @@
       </table>
     {/if}
   </section>
+
+  {#key data.projectId}
+    <TokenManager
+      id="project-tokens"
+      heading="Project API tokens"
+      intro="A project token is pinned to this project and never gets more than member access. Use it for CI and for Mailpit compatible clients. The secret is shown once, at creation. Prefix: spp_."
+      scopes={['read', 'write']}
+      load={() => api.listProjectTokens(data.projectId)}
+      create={(input) => api.createProjectToken(data.projectId, input)}
+      revoke={(t) => api.revokeProjectToken(data.projectId, t.id)}
+    />
+    <ProjectAccess projectId={data.projectId} isAdmin={session.user?.is_admin === true} />
+  {/key}
 </div>
 
 <style>

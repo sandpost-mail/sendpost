@@ -1,15 +1,21 @@
 import { error } from '@sveltejs/kit';
-import { ApiError, client } from '$lib/api';
+import { projectAccess } from '$lib/access';
+import { client } from '$lib/api';
+import { failLoad } from '$lib/loadError';
 import type { LayoutLoad } from './$types';
 
-export const load: LayoutLoad = async ({ params, fetch }) => {
+export const load: LayoutLoad = async ({ params, fetch, parent }) => {
+  const { user } = await parent();
   const projectId = Number(params.id);
   if (!Number.isInteger(projectId) || projectId <= 0) error(404, 'Project not found');
+  const api = client(fetch);
   try {
-    const project = await client(fetch).getProject(projectId);
-    return { projectId, project };
+    const [project, access] = await Promise.all([
+      api.getProject(projectId),
+      projectAccess(api, user, projectId)
+    ]);
+    return { projectId, project, access };
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) error(404, 'Project not found');
-    error(502, e instanceof Error ? e.message : 'Could not load the project');
+    failLoad(e, 'project');
   }
 };

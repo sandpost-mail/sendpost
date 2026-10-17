@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
-import { ApiError, client } from '$lib/api';
+import { client } from '$lib/api';
+import { failLoad } from '$lib/loadError';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async ({ params, parent, fetch }) => {
@@ -10,7 +11,6 @@ export const load: PageLoad = async ({ params, parent, fetch }) => {
     const message = await client(fetch).getMessage(projectId, messageId);
     return { projectId, message };
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) error(404, 'Message not found');
-    error(502, e instanceof Error ? e.message : 'Could not load the message');
+    failLoad(e, 'message');
   }
 };
