@@ -82,10 +82,26 @@ func (a *Authorizer) baseRole(ctx context.Context, p Principal, projectID int64)
 	if err != nil {
 		return RoleNone, fmt.Errorf("project role: %w", err)
 	}
+	return baseOf(p, rank), nil
+}
+
+// baseOf is the role a user holds before the token ceiling: admin for
+// instance administrators, otherwise the group rank (1..3 matches
+// viewer..owner, 0 is none).
+func baseOf(p Principal, rank int32) Role {
 	if p.IsAdmin {
-		return RoleAdmin, nil
+		return RoleAdmin
 	}
-	return Role(rank), nil // rank 1..3 matches viewer..owner, 0 is none
+	return Role(rank)
+}
+
+// UserRole is the effective role of a user principal on a project where its
+// groups give rank (see sqlcgen.ProjectRoleRank), capped by the token ceiling.
+// RoleOn and the project listing both resolve through it, so a role shown to
+// a caller is the one the guard enforces. Instance administrators are admin
+// whatever the rank, pass 0 for them.
+func UserRole(p Principal, rank int32) Role {
+	return min(baseOf(p, rank), p.Ceiling)
 }
 
 // Project checks that the principal holds c on the project and returns the

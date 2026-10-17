@@ -9,40 +9,6 @@ import (
 	"context"
 )
 
-const listVisibleProjects = `-- name: ListVisibleProjects :many
-SELECT p.id, p.slug, p.name, p.created_at
-FROM projects p
-WHERE EXISTS (
-    SELECT 1 FROM project_groups pg JOIN group_members gm ON gm.group_id = pg.group_id
-    WHERE pg.project_id = p.id AND gm.user_id = $1)
-ORDER BY p.name, p.id
-`
-
-func (q *Queries) ListVisibleProjects(ctx context.Context, userID int64) ([]Project, error) {
-	rows, err := q.db.Query(ctx, listVisibleProjects, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Project
-	for rows.Next() {
-		var i Project
-		if err := rows.Scan(
-			&i.ID,
-			&i.Slug,
-			&i.Name,
-			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const projectExists = `-- name: ProjectExists :one
 SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1)
 `

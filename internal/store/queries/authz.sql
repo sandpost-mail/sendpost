@@ -10,11 +10,3 @@ GROUP BY p.id;
 
 -- name: ProjectExists :one
 SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1);
-
--- name: ListVisibleProjects :many
-SELECT p.id, p.slug, p.name, p.created_at
-FROM projects p
-WHERE EXISTS (
-    SELECT 1 FROM project_groups pg JOIN group_members gm ON gm.group_id = pg.group_id
-    WHERE pg.project_id = p.id AND gm.user_id = $1)
-ORDER BY p.name, p.id;

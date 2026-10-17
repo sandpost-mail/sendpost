@@ -47,6 +47,19 @@ func (r Role) String() string {
 	return "none"
 }
 
+// ProjectRoleName is the role as the API presents it on a project: viewer,
+// member or owner. Instance administrators act as owners, so admin maps to
+// owner. It returns the empty string for no access.
+func (r Role) ProjectRoleName() string {
+	switch r {
+	case RoleViewer, RoleMember:
+		return r.String()
+	case RoleOwner, RoleAdmin:
+		return RoleOwner.String()
+	}
+	return ""
+}
+
 // Capability is one thing a principal may be allowed to do.
 type Capability string
 

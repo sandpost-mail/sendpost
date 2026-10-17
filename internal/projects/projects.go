@@ -119,16 +119,28 @@ func (s *Service) Get(ctx context.Context, scope authz.Scope) (Project, error) {
 	return Project(row), nil
 }
 
-// ListVisible returns the projects a user holds a role on, ordered by name.
-// Instance administrators use List instead.
-func (s *Service) ListVisible(ctx context.Context, userID int64) ([]Project, error) {
-	rows, err := s.q.ListVisibleProjects(ctx, userID)
+// Visible is a project a user holds a role on through their groups.
+type Visible struct {
+	Project Project
+	// Rank is the highest group role rank on the project (3 owner, 2 member,
+	// 1 viewer), the input of authz.UserRole.
+	Rank int32
+}
+
+// ListVisible returns the projects a user holds a role on, ordered by name,
+// each with the user's highest group role rank, in one query. Instance
+// administrators use List instead.
+func (s *Service) ListVisible(ctx context.Context, userID int64) ([]Visible, error) {
+	rows, err := s.q.ListVisibleProjectsWithRank(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list visible projects: %w", err)
 	}
-	out := make([]Project, 0, len(rows))
+	out := make([]Visible, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, Project(r))
+		out = append(out, Visible{
+			Project: Project{ID: r.ID, Slug: r.Slug, Name: r.Name, CreatedAt: r.CreatedAt},
+			Rank:    r.Rank,
+		})
 	}
 	return out, nil
 }
