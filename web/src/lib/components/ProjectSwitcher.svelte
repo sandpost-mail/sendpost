@@ -2,6 +2,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { projects } from '$lib/projects.svelte';
+  import { session } from '$lib/session.svelte';
 
   const NEW = 'new';
   let current = $derived(page.params.id ?? '');
@@ -21,7 +22,9 @@
     {#each projects.items as p (p.id)}
       <option value={String(p.id)}>{p.name}</option>
     {/each}
-    <option value={NEW}>New project…</option>
+    {#if session.user?.is_admin}
+      <option value={NEW}>New project…</option>
+    {/if}
   </select>
 </label>
 

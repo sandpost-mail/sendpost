@@ -1,0 +1,12 @@
+import { client } from '$lib/api';
+import { failLoad } from '$lib/loadError';
+import type { PageLoad } from './$types';
+
+export const load: PageLoad = async ({ parent, fetch }) => {
+  await parent();
+  try {
+    return { groups: await client(fetch).listGroups() };
+  } catch (e) {
+    failLoad(e, 'group list');
+  }
+};

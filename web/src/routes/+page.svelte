@@ -2,6 +2,7 @@
   import { goto } from '$app/navigation';
   import NewProjectForm from '$lib/components/NewProjectForm.svelte';
   import { lastProjectId, projects } from '$lib/projects.svelte';
+  import { session } from '$lib/session.svelte';
 
   // Open the last project, or the first one, once the list is known.
   $effect(() => {
@@ -19,8 +20,15 @@
     <p class="error" role="alert">{projects.error}</p>
   {:else if projects.items.length === 0}
     <h1>Welcome to Sandpost</h1>
-    <p class="muted">Create a project, then add SMTP credentials and point your app at this server.</p>
-    <NewProjectForm />
+    {#if session.user?.is_admin}
+      <p class="muted">Create a project, then add SMTP credentials and point your app at this server.</p>
+      <NewProjectForm />
+    {:else}
+      <p class="muted">
+        You do not have access to any project yet. Ask an administrator to give one of your groups a
+        role on a project.
+      </p>
+    {/if}
   {/if}
 </div>
 

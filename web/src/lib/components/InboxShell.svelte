@@ -4,6 +4,7 @@
   import { Inbox } from '$lib/inbox.svelte';
   import { subscribeToProject, type LiveStatus } from '$lib/live';
   import { relativeTime } from '$lib/format';
+  import { session } from '$lib/session.svelte';
 
   let { projectId, children }: { projectId: number; children: Snippet } = $props();
 
@@ -25,7 +26,9 @@
     inbox.reload('');
     return subscribeToProject(pid, {
       onStatus: (s) => (status = s),
-      onEvent: () => inbox.refreshHead()
+      onEvent: () => inbox.refreshHead(),
+      // Most likely the session ended: asking `me` redirects to the login page.
+      onClosed: () => void session.refresh().catch(() => {})
     });
   });
 

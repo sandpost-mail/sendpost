@@ -15,6 +15,8 @@
   let viewport = $state<'desktop' | 'mobile'>('desktop');
   let source = $state<{ id: number; text: string } | null>(null);
   let sourceError = $state('');
+  let preview = $state<{ id: number; url: string } | null>(null);
+  let previewError = $state('');
 
   // New message: pick the best default tab, mark it read.
   $effect(() => {
@@ -22,12 +24,25 @@
     tab = m.has_html ? 'html' : 'text';
     source = null;
     sourceError = '';
+    preview = null;
+    previewError = '';
     if (!m.read_at) {
       api
         .markRead(data.projectId, m.id)
         .then(() => inbox?.markRead(m.id))
         .catch(() => {});
     }
+  });
+
+  // The preview iframe has no cookie, so it loads a short lived signed URL.
+  $effect(() => {
+    if (tab !== 'html' || !message.has_html || preview?.id === message.id) return;
+    const id = message.id;
+    previewError = '';
+    api
+      .previewUrl(data.projectId, id)
+      .then((p) => (preview = { id, url: p.url }))
+      .catch((e) => (previewError = errorMessage(e)));
   });
 
   $effect(() => {
@@ -91,14 +106,20 @@
         <span class="muted">Scripts and remote content are blocked.</span>
       </div>
       <div class="frame" class:mobile={viewport === 'mobile'}>
-        {#key message.id}
-          <iframe
-            title="HTML preview"
-            src={url('/html')}
-            sandbox="allow-popups allow-popups-to-escape-sandbox"
-            referrerpolicy="no-referrer"
-          ></iframe>
-        {/key}
+        {#if previewError}
+          <p class="error" role="alert">{previewError}</p>
+        {:else if preview?.id === message.id}
+          {#key message.id}
+            <iframe
+              title="HTML preview"
+              src={preview.url}
+              sandbox="allow-popups allow-popups-to-escape-sandbox"
+              referrerpolicy="no-referrer"
+            ></iframe>
+          {/key}
+        {:else}
+          <p class="muted">Loading…</p>
+        {/if}
       </div>
     {:else if tab === 'text'}
       {#if message.text}

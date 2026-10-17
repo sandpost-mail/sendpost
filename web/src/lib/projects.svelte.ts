@@ -20,6 +20,13 @@ class ProjectsStore {
     }
   }
 
+  /** Forget everything, for example after signing out. */
+  reset(): void {
+    this.items = [];
+    this.loaded = false;
+    this.error = '';
+  }
+
   add(project: Project): void {
     this.items = [...this.items.filter((p) => p.id !== project.id), project].sort((a, b) =>
       a.name.localeCompare(b.name)

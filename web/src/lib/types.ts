@@ -93,3 +93,101 @@ export interface TagRuleInput {
 }
 
 export type LiveEventType = 'ready' | 'message.created' | 'resync';
+
+export type Role = 'viewer' | 'member' | 'owner';
+
+export interface User {
+  id: number;
+  email: string;
+  name: string;
+  is_admin: boolean;
+  must_change_password: boolean;
+  created_at: string;
+  disabled_at: string | null;
+}
+
+export interface UserInput {
+  email: string;
+  name: string;
+  password: string;
+  is_admin: boolean;
+}
+
+export interface UserPatch {
+  name?: string;
+  is_admin?: boolean;
+  disabled?: boolean;
+}
+
+/** Answer of POST /auth/login. */
+export interface SessionInfo {
+  user: User;
+  csrf_token: string;
+  expires_at: string;
+}
+
+/** Answer of GET /auth/me. The CSRF token is only present for browser sessions. */
+export interface MeInfo {
+  user: User;
+  auth_kind: 'session' | 'user_token';
+  csrf_token?: string;
+  expires_at?: string;
+}
+
+export interface Group {
+  id: number;
+  name: string;
+  created_at: string;
+  /** Only filled by the list endpoint. */
+  member_count: number;
+}
+
+export interface Assignment {
+  group_id: number;
+  group_name: string;
+  role: Role;
+}
+
+export type TokenScope = 'read' | 'write' | 'manage';
+
+export interface TokenInput {
+  label: string;
+  scopes: TokenScope[];
+}
+
+export interface Token {
+  id: number;
+  owner_user_id: number | null;
+  project_id: number | null;
+  prefix: string;
+  label: string;
+  scopes: TokenScope[];
+  created_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+}
+
+export interface IssuedToken extends Token {
+  secret: string;
+}
+
+export interface AuditEvent {
+  id: number;
+  at: string;
+  actor_user_id: number | null;
+  actor_email: string;
+  project_id: number | null;
+  action: string;
+  target: string;
+  detail: Record<string, unknown>;
+}
+
+export interface AuditPage {
+  items: AuditEvent[];
+  next_cursor: string;
+}
+
+export interface PreviewUrl {
+  url: string;
+  expires_at: string;
+}

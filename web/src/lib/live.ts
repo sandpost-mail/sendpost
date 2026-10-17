@@ -7,6 +7,8 @@ export interface LiveHandlers {
   /** Called for every event after `ready`, and once on each (re)connect. */
   onEvent: (type: LiveEventType) => void;
   onStatus: (status: LiveStatus) => void;
+  /** The browser gave up on the stream (it will not retry by itself). */
+  onClosed?: () => void;
 }
 
 const EVENT_TYPES: LiveEventType[] = ['ready', 'message.created', 'resync'];
@@ -20,7 +22,12 @@ const EVENT_TYPES: LiveEventType[] = ['ready', 'message.created', 'resync'];
 export function subscribeToProject(projectId: number, handlers: LiveHandlers): () => void {
   handlers.onStatus('connecting');
   const source = new EventSource(`${projectUrl(projectId)}/events`);
-  source.onerror = () => handlers.onStatus('offline');
+  source.onerror = () => {
+    handlers.onStatus('offline');
+    // A closed stream does not reconnect: the server refused it (an expired
+    // session or lost access) or ended it, so let the caller check why.
+    if (source.readyState === EventSource.CLOSED) handlers.onClosed?.();
+  };
   for (const type of EVENT_TYPES) {
     source.addEventListener(type, () => {
       if (type === 'ready') handlers.onStatus('live');
