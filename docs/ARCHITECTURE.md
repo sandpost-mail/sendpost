@@ -101,20 +101,58 @@ Rules the engine enforces:
 - Attachment rows hold metadata and an `ordinal`. Bytes are re-parsed from `raw` on download.
 - The event bus keeps one dedicated connection per replica, LISTENs on `sp_msg_<projectID>` only while a local subscriber exists, and sends `resync` after a reconnect. `NOTIFY` is issued inside the ingest transaction, so it fires only on commit.
 - The SPA is built into `internal/webui/dist` (placeholder only in git) and embedded. The HTML preview is served by `/_/api/v1/projects/{id}/messages/{id}/html` with a sandbox CSP (no scripts, remote images blocked).
-- Until M2 the native API is unauthenticated. M2.3 must move every query behind the project scoped repository and add auth; note that images in the sandboxed (opaque origin) preview will not carry session cookies, so inline attachment URLs will need signing or another scheme.
+- The native API was unauthenticated until M2. That is resolved, see the M2 implementation notes below (the inline attachment URLs of the sandboxed preview are now signed).
+
+### M2 implementation notes
+
+Authentication
+- Two credentials reach the native API: a browser session (cookie `sandpost_session`, or `__Host-sandpost_session` when `COOKIE_SECURE=true`) and a bearer API token. A Bearer header always wins and never falls back to the cookie. A request with neither gets 401.
+- Login (`POST /auth/login`) verifies argon2id (a dummy hash is verified for unknown emails, so timing does not reveal accounts) and creates a session. The cookie holds 256 random bits, only its HMAC is stored in `sessions.id`. Sessions last 24 hours, absolute. Disabling a user, resetting its password, or the user changing its password ends its other sessions.
+- The cookie is `HttpOnly`, `SameSite=Strict`, `Path=/`, and `Secure` when `COOKIE_SECURE` is set. Set it whenever users reach the UI over HTTPS, including behind a TLS terminating proxy. Failed logins are limited per source address (20 per 5 minutes) and per account name (10 per 5 minutes), then 429 with `Retry-After`. Behind a proxy all clients share the proxy address, the account limit still applies.
+- CSRF: every unsafe request authenticated by cookie must carry `X-CSRF-Token`. The token is derived as an HMAC of the session id with its own key (nothing stored) and is returned by login and `GET /auth/me`. Bearer requests do not need it. Writes must also be `application/json`, so plain cross site form posts never reach a handler.
+- `must_change_password` (set by the bootstrap admin, user creation and password resets) limits the user to `GET /auth/me`, `POST /auth/password` and `POST /auth/logout`. Everything else answers 403 with code `password_change_required`. Changing the password is for browser sessions only, so a leaked token can not take over an account.
+- Machine credentials follow M1: API tokens are `spu_` (user) or `spp_` (project) plus 256 random bits, stored as an HMAC under their own derived key, with the first 12 characters kept for display. They are shown once at creation and can be revoked. A token never carries more power than its owner: user token scopes are `read` (viewer ceiling), `write` (member ceiling) and `manage` (no ceiling). Project tokens are pinned to one project, accept `read` and `write` only, and are capped at member even if a row says otherwise. A token can only mint tokens within its own scopes. Tokens of a disabled user stop working at once.
+
+Authorization
+- `internal/authz` holds the role matrix (viewer, member, owner, plus admin), the effective role (highest role among the user's groups on the project, one SQL query, admins are admin everywhere, token scopes cap it), and `Scope`, a value that can only be obtained by passing a capability check (`Authorizer.Project`), by verifying a signed grant, or with `authz.Trusted` for paths that were authorized differently (the SMTP credential fixes the project of a session, and test setup). The messages, credentials, projects (tag rules), groups (role assignment) and tokens (project tokens) services take a `Scope`, never a bare project id. Child ids (message, credential, rule, token) are always resolved with `project_id` in the SQL `WHERE`.
+- All native routes are declared once in `internal/api/routes.go` with an access kind (`public`, `any`, `user`, `global`, `project`, `signed`) and a capability. One guard enforces them, handlers never decide access. The authorization matrix test, the leakage suite and the OpenAPI check all iterate over that table, so a new route without a fixture or a spec entry fails CI.
+- Status policy: 401 not authenticated. 404 for anything missing or not visible, with a body identical to a missing project, so ids can not be probed. 403 when the caller can see the project but lacks the capability. Lists are filtered (`GET /projects` returns only visible projects).
+- Capabilities (see 2.5): `messages.read` viewer (this includes marking a message read and the event stream), `messages.write` member, `project.manage` (credentials, tag rules, project tokens) owner, `project.groups` (role assignment, project audit) owner, and the global `users.manage`, `groups.manage`, `projects.create`, `audit.read` for administrators. The last active administrator can not be demoted or disabled.
+
+Sandboxed preview and SSE
+- The preview iframe has an opaque origin and carries no cookie. `GET .../messages/{mid}/preview-url` (needs `messages.read`) returns a URL with `grant=<expiry>.<signature>`, valid 5 minutes. The signature is an HMAC under a key derived from `SECRET_KEY` and binds project id, message id, resource (`html` or `attachment/<ordinal>`) and expiry. The HTML response rewrites `cid:` references to attachment URLs carrying their own grants. A grant is only honoured by the `html` and `attachments` routes, only for GET, and a replay on other ids or resources gets 404. The responses send `Referrer-Policy: no-referrer`.
+- The event stream authorizes before subscribing, so no `LISTEN` is opened for an unauthorized caller. A stream of a browser session ends when the session expires.
+
+Audit
+- Admin actions write `audit_log` rows in the same transaction as the change (user, group, membership, project, role assignment, credential, tag rule and token actions). The actor travels in the request context. `detail` never holds secrets. `GET /audit` (administrators) and `GET /projects/{pid}/audit` (owners) page with a cursor.
+
+API shape for the UI (item 2.8)
+- Login: `POST /auth/login` returns `{user, csrf_token, expires_at}`. If `user.must_change_password` is true, show the password form (`POST /auth/password`) and nothing else. Store `csrf_token` in memory and send it as `X-CSRF-Token` on every non GET. After a page reload call `GET /auth/me` to get it back, a 401 means show the login page.
+- Errors are `{error, code?}`. Codes the UI branches on: `unauthenticated`, `csrf_invalid`, `password_change_required`, `invalid_credentials`, `too_many_attempts`.
+- Lists are `{items: [...]}`, paged lists (messages, audit) add `next_cursor` (empty on the last page).
+- Secrets (SMTP credential secret, token secret) appear only in the creation response.
+- The OpenAPI document is `docs/openapi.yaml`. It is hand written, `make openapi` (and the `openapi` CI job) checks it against the registered routes and lints it.
+- Known gap: the SPA still sends no credentials, so until 2.8 the web UI can not be used against an authenticated server. Use the API with a bearer token, or `curl` with a login cookie.
+
+Decisions taken here (revisit if needed)
+- Marking a message read is a `messages.read` capability, so viewers can do it (it is shared state, but a read only role would make opening a message fail).
+- Project owners can assign any existing group (by id) to their project, not only groups they can see. An owner can probe group ids that way.
+- Session lifetime is a fixed 24 hours, there is no sliding window or "remember me".
+- `sandpost admin` has no user tasks yet. A locked out last administrator has to be fixed in the database.
 
 ## 3. Data model (Postgres)
 
 ```
 users(id, email, name, password_hash, is_admin, must_change_password, created_at, disabled_at)
-groups(id, name)
-group_members(group_id, user_id)
+groups(id, name, created_at)                          -- unique on lower(name)
+group_members(group_id, user_id, added_at)
 projects(id, slug, name, created_at)
 project_groups(project_id, group_id, role)            -- role: viewer | member | owner
 
 smtp_credentials(id, project_id, username, secret_hmac, label, created_at, revoked_at, last_used_at)
-api_tokens(id, owner_user_id null, project_id null, token_hmac, prefix, label, scopes, created_at, revoked_at)
-sessions(id, user_id, created_at, expires_at)
+api_tokens(id, owner_user_id null, project_id null, token_hmac, prefix, label, scopes text[],
+           created_by null, created_at, revoked_at, last_used_at)   -- exactly one of owner_user_id, project_id
+sessions(id bytea = HMAC of the cookie value, user_id, created_at, expires_at)
 
 messages(id, project_id, received_at, message_id_hdr, from_addr, subject, size_bytes,
          text_body, html_body, raw bytea, headers jsonb, read_at, search tsvector)

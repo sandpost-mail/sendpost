@@ -2,7 +2,7 @@
 
 Self-hosted email capture and safe delivery for development, staging and CI. One Go binary, a Svelte UI, Postgres. See [docs/PRD.md](docs/PRD.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/BACKLOG.md](docs/BACKLOG.md).
 
-Status: early development (milestone M1, capture core). Apps can send mail through authenticated SMTP and you read it live in the web UI. There is no login yet (M2): run Sandpost on a trusted network only.
+Status: early development. M1 (capture core) is done: apps send mail through authenticated SMTP and it is stored and streamed live. M2 (access control) is done on the backend: login, sessions, users, groups, project roles, API tokens and an audit log, with the whole native API behind them. The web UI for login and administration (M2.8) is not built yet, so the bundled UI can not log in: drive the API directly for now, see "Access control" below.
 
 ## Quick start
 
@@ -11,8 +11,9 @@ Requirements: Go (see `go.mod`), Docker, Node 22 or later for the web app.
 ```
 make dev        # builds the UI, Postgres in Docker, migrations, server on :8080 (SMTP :1025)
 make dev-nodb   # same without Docker: needs DATABASE_URL pointing at your own Postgres
-make test       # unit and integration tests (integration tests need Docker)
+make test       # unit and integration tests (integration tests need Docker, or TEST_DATABASE_URL)
 make lint
+make openapi    # check docs/openapi.yaml against the routes and lint it (needs Node)
 ```
 
 Run the full stack in containers:
@@ -34,6 +35,7 @@ Environment variables, optionally preloaded from a `KEY=VALUE` file named by `SA
 | `HTTP_LISTEN` | no | `:8080` | |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | no | | set both or neither |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | no | | first boot bootstrap, set both or neither. Creates an admin (password change required at first login) only when there are no users yet, never overwrites |
+| `COOKIE_SECURE` | no | `false` | `true` marks the UI session cookie `Secure` (and uses the `__Host-` cookie name). Set it whenever users reach the UI over HTTPS, including behind a TLS terminating proxy |
 | `MAX_MESSAGE_BYTES` | no | 26214400 | |
 | `SMTP_TLS_MODE` | no | `off`, or `starttls` when a certificate is set | `off`, `starttls` (plaintext AUTH still allowed), `required` (AUTH only after STARTTLS), `implicit` (TLS from the first byte). Anything but `off` needs the certificate |
 | `LOG_LEVEL`, `LOG_FORMAT` | no | `info`, `text` | format is `text` or `json` |
@@ -49,7 +51,22 @@ Behavior worth knowing:
 - Search syntax in the inbox: `from:` `to:` `subject:` `tag:` `body:` `date:YYYY-MM-DD` `after:` `before:`, quoted values for spaces, plain words match subject and body.
 - Tag rules (Settings) tag messages at ingest by header (for example `X-Run-Id` into `run:{value}`) or recipient, with `*` wildcards.
 - Live updates use Postgres `LISTEN/NOTIFY` and SSE, so every replica pushes to its own browsers.
-- Native API under `/_/api/v1` (projects, credentials, tag rules, messages, SSE at `.../events`). Writes must send `Content-Type: application/json`. It has no authentication until M2.
+- Native API under `/_/api/v1`, described in [docs/openapi.yaml](docs/openapi.yaml). Writes must send `Content-Type: application/json`.
+
+## Access control
+
+Every native API route except login, `GET /info` and the signed preview URLs needs authentication, either a browser session or an API token.
+
+- The first admin comes from `ADMIN_EMAIL` and `ADMIN_PASSWORD` and must change the password at first login. Admins create users and groups, assign groups to projects with a role (viewer, member or owner), and create projects. A user's role on a project is the highest role among its groups.
+- Log in with `POST /_/api/v1/auth/login` (`{"email", "password"}`). The response sets the session cookie and returns a `csrf_token` that must be sent as `X-CSRF-Token` on every write. While `must_change_password` is true only `POST /auth/password`, `GET /auth/me` and logout work.
+- For scripts and CI use API tokens: `POST /_/api/v1/users/me/tokens` (user token, `spu_...`) or `POST /_/api/v1/projects/{id}/tokens` (project token, `spp_...`, pinned to one project, scopes `read` and `write`). The secret is shown once, send it as `Authorization: Bearer <token>`. Tokens never exceed what their owner may do and can be revoked.
+- A project you have no role on answers 404, exactly like a project that does not exist. A visible project where your role is too low answers 403.
+- Admin actions are recorded in an audit log: `GET /_/api/v1/audit` for admins, `GET /_/api/v1/projects/{id}/audit` for project owners.
+
+```
+curl -c jar -H 'Content-Type: application/json' -d '{"email":"admin@example.com","password":"..."}' localhost:8080/_/api/v1/auth/login
+curl -b jar -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"Shop"}' localhost:8080/_/api/v1/projects
+```
 
 ## Commands
 

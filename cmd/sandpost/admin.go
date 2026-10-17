@@ -7,7 +7,7 @@ import (
 
 const adminUsage = `Usage: sandpost admin <task>
 
-Administrative tasks (create-user, reset-password, ...) arrive with M2.
+Administrative tasks (create-user, reset-password, ...) are not implemented yet. Users and groups are managed through the API (docs/openapi.yaml).
 The first admin is created on boot from ADMIN_EMAIL and ADMIN_PASSWORD.
 `
 

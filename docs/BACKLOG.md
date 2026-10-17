@@ -49,6 +49,8 @@ Status: 1.1 to 1.11 implemented (see ARCHITECTURE, M1 implementation notes). Int
 
 Exit criteria: two groups with different roles on two projects only see what they should, proven by tests.
 
+Status: 2.1 to 2.7 and 2.9 implemented (backend, see ARCHITECTURE, M2 implementation notes). 2.8 (UI) is not started: until it lands the SPA sends no credentials and can not be used against an authenticated server. The cross-tenant suite proves the exit criteria at the API level (`internal/api/access_test.go`).
+
 ## M3. Mailpit-compatible API
 
 | ID | Item | Size |
