@@ -1078,12 +1078,17 @@ components:
         items: { type: array, items: { $ref: "#/components/schemas/Assignment" } }
     Project:
       type: object
-      required: [id, slug, name, created_at]
+      required: [id, slug, name, created_at, role]
       properties:
         id: { type: integer, format: int64 }
         slug: { type: string }
         name: { type: string }
         created_at: { type: string, format: date-time }
+        role:
+          allOf: [{ $ref: "#/components/schemas/Role" }]
+          description: >-
+            The caller's effective role on the project. Instance administrators are owners.
+            A token caller gets the role capped by its scopes (read is viewer, write is member).
     ProjectList:
       type: object
       required: [items]
