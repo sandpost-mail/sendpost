@@ -52,14 +52,15 @@ paths:
     get:
       tags: [server]
       operationId: getInfo
-      summary: Public connection hints for the UI
-      security: []
+      summary: Connection hints for the UI (SMTP port, TLS mode, version)
       responses:
         "200":
           description: Server information
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ServerInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /auth/login:
     post:

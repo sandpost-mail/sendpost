@@ -28,7 +28,7 @@ const (
 	contentTypeJSON = "application/json"
 )
 
-// ServerInfo is public, non secret server information the UI needs.
+// ServerInfo is non secret server information the UI needs (served to authenticated callers).
 type ServerInfo struct {
 	SMTPPort    int    `json:"smtp_port"`
 	SMTPTLSMode string `json:"smtp_tls_mode"`
@@ -63,12 +63,15 @@ type Deps struct {
 type server struct {
 	Deps
 	logins *loginLimits
+	// loginSlots bounds concurrent password checks: each argon2 verify takes
+	// 64 MiB, and the failure limit is only exact when checks do not overlap.
+	loginSlots chan struct{}
 }
 
 // NewHandler returns the HTTP handler: health endpoints, the native API under
 // /_/api/v1 and the UI for everything else.
 //
-// Every native API route except login, info and the signed preview URLs
+// Every native API route except login and the signed preview URLs
 // requires authentication, see routes.go. Mutating requests must be JSON,
 // which keeps simple cross site form posts from reaching the handlers, and
 // cookie authenticated ones also need the CSRF header.
@@ -79,7 +82,7 @@ func NewHandler(d Deps) http.Handler {
 	mux := http.NewServeMux()
 	registerHealth(mux, d.DB)
 	if d.Authz != nil {
-		s := &server{Deps: d, logins: newLoginLimits()}
+		s := &server{Deps: d, logins: newLoginLimits(), loginSlots: make(chan struct{}, maxConcurrentLogins)}
 		s.registerV1(mux)
 	}
 	if d.UI != nil {

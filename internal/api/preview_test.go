@@ -180,30 +180,29 @@ func TestEventStreamAccess(t *testing.T) {
 	}
 	waitFor("event: ready")
 
-	// Shorten the session: the server must end the stream at expiry.
-	if _, err := w.a.pool.Exec(context.Background(), "UPDATE sessions SET expires_at = now() + interval '1 second' WHERE user_id = $1", uid); err != nil {
+	// A stream captured the old expiry (24h) when it started, so a fresh one
+	// is opened after shortening the session: the server must end it at expiry.
+	if _, err := w.a.pool.Exec(context.Background(), "UPDATE sessions SET expires_at = now() + interval '3 seconds' WHERE user_id = $1", uid); err != nil {
 		t.Fatal(err)
 	}
-	// The stream already captured the old expiry (24h): a fresh connection picks up the new one.
 	req2, _ := http.NewRequestWithContext(ctx, http.MethodGet, w.a.srv.URL+events, nil)
 	resp2, err := b.c.Do(req2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp2.Body.Close() }()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		sc := bufio.NewScanner(resp2.Body)
-		for sc.Scan() {
-			if strings.HasPrefix(sc.Text(), "event: message.created") {
-				return
-			}
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second stream: status %d", resp2.StatusCode)
+	}
+	sc := bufio.NewScanner(resp2.Body)
+	ready := false
+	for sc.Scan() {
+		if sc.Text() == "event: ready" {
+			ready = true
 		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the stream outlived its session")
+	}
+	// Scan only returns once the server closed the stream (or the test context ended).
+	if !ready || ctx.Err() != nil {
+		t.Fatalf("stream ended without ready (%v) or outlived its session (ctx: %v)", ready, ctx.Err())
 	}
 }

@@ -55,7 +55,7 @@ Behavior worth knowing:
 
 ## Access control
 
-Every native API route except login, `GET /info` and the signed preview URLs needs authentication, either a browser session or an API token.
+Every native API route except login and the signed preview URLs needs authentication, either a browser session or an API token.
 
 - The first admin comes from `ADMIN_EMAIL` and `ADMIN_PASSWORD` and must change the password at first login. Admins create users and groups, assign groups to projects with a role (viewer, member or owner), and create projects. A user's role on a project is the highest role among its groups.
 - Log in with `POST /_/api/v1/auth/login` (`{"email", "password"}`). The response sets the session cookie and returns a `csrf_token` that must be sent as `X-CSRF-Token` on every write. While `must_change_password` is true only `POST /auth/password`, `GET /auth/me` and logout work.

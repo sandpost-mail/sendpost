@@ -207,6 +207,33 @@ func TestChildIdsOfAnotherProject(t *testing.T) {
 	}
 }
 
+// TestTokenRoutesIgnoreTokensOfOtherOwners uses the id of a project token with
+// the user level routes that revoke tokens by id: they must not touch it.
+func TestTokenRoutesIgnoreTokensOfOtherOwners(t *testing.T) {
+	w := newWorld(t)
+	foreign := itoa64(w.p2.tid)
+	w.a.mustJSONAs(w.owner1, http.MethodDelete, v1+"/users/me/tokens/"+foreign, nil, http.StatusNotFound, nil)
+	w.a.mustJSON(http.MethodDelete, v1+"/users/"+itoa64(w.uid)+"/tokens/"+foreign, nil, http.StatusNotFound, nil)
+	// Another user's token id through the own-token route.
+	var mine struct{ ID int64 }
+	w.a.mustJSONAs(w.alice, http.MethodPost, v1+"/users/me/tokens", map[string]any{"scopes": []string{"read"}}, http.StatusCreated, &mine)
+	w.a.mustJSONAs(w.owner1, http.MethodDelete, v1+"/users/me/tokens/"+itoa64(mine.ID), nil, http.StatusNotFound, nil)
+	w.a.mustJSONAs(w.alice, http.MethodGet, v1+"/users/me/tokens", nil, http.StatusOK, nil)
+
+	var list struct{ Items []struct{ RevokedAt *string } }
+	w.a.mustJSONAs(w.alice, http.MethodGet, v1+"/users/me/tokens", nil, http.StatusOK, &list)
+	for _, it := range list.Items {
+		if it.RevokedAt != nil {
+			t.Errorf("a token of another owner was revoked: %+v", it)
+		}
+	}
+	// The project token of p2 still works.
+	w.a.mustJSON(http.MethodGet, pp(w.p2.pid, "/tokens"), nil, http.StatusOK, &list)
+	if len(list.Items) != 1 || list.Items[0].RevokedAt != nil {
+		t.Errorf("project token of p2: %+v", list.Items)
+	}
+}
+
 func hasChildParam(path string) bool {
 	for _, p := range []string{"{mid}", "{cid}", "{rid}", "{tid}"} {
 		if strings.Contains(path, p) {

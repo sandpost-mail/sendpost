@@ -289,6 +289,36 @@ func TestFailedLoginsLookAlikeAndAreLimited(t *testing.T) {
 	}
 }
 
+// TestParallelGuessesStayWithinTheLimit fires a burst at one account. Without
+// the slot check every request would pass the limiter before any failure is
+// recorded.
+func TestParallelGuessesStayWithinTheLimit(t *testing.T) {
+	a := newApp(t)
+	testutil.UserWithPassword(t, a.pool, "target@example.test", userPassword, false, false)
+	const burst = 40
+	codes := make(chan int, burst)
+	for range burst {
+		go func() {
+			resp, _ := a.browser().login("target@example.test", "wrong wrong wrong")
+			codes <- resp.StatusCode
+		}()
+	}
+	counts := map[int]int{}
+	for range burst {
+		counts[<-codes]++
+	}
+	// The account allows 10 failures, and at most 4 attempts hold a slot at once.
+	if counts[http.StatusUnauthorized] > 14 || counts[http.StatusTooManyRequests] < burst-14 {
+		t.Errorf("a burst of %d guesses got %v, want at most 14 evaluated", burst, counts)
+	}
+	if counts[http.StatusUnauthorized]+counts[http.StatusTooManyRequests] != burst {
+		t.Errorf("unexpected statuses: %v", counts)
+	}
+	// The right password is refused while the account is limited.
+	resp, data := a.browser().login("target@example.test", userPassword)
+	status(t, resp, data, http.StatusTooManyRequests)
+}
+
 func TestSecureCookieMode(t *testing.T) {
 	a := newApp(t, func(d *api.Deps) { d.CookieSecure = true })
 	testutil.UserWithPassword(t, a.pool, "s@example.test", userPassword, false, false)

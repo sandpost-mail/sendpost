@@ -13,7 +13,7 @@ import (
 type access int
 
 const (
-	// accessPublic needs nothing: login, server info.
+	// accessPublic needs nothing: login only.
 	accessPublic access = iota
 	// accessAny needs any authenticated principal, including project tokens.
 	accessAny
@@ -92,7 +92,7 @@ func attachmentResource(r *http.Request) string { return "attachment/" + r.PathV
 func (s *server) routes() []route {
 	const p = "/projects/{pid}"
 	return []route{
-		{method: "GET", path: "/info", access: accessPublic, h: s.info},
+		{method: "GET", path: "/info", access: accessAny, h: s.info},
 
 		// Authentication.
 		{method: "POST", path: "/auth/login", access: accessPublic, h: s.login},

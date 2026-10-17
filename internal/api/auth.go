@@ -19,6 +19,8 @@ const (
 	loginWindow      = 5 * time.Minute
 	maxLoginsPerIP   = 20
 	maxLoginsPerUser = 10
+	// maxConcurrentLogins bounds argon2 work (64 MiB each) on the public login route.
+	maxConcurrentLogins = 4
 )
 
 // loginLimits throttles failed logins per source address and per account
@@ -43,6 +45,11 @@ func (l *loginLimits) blocked(ip, account string) bool {
 func (l *loginLimits) fail(ip, account string) {
 	l.ip.Fail(ip)
 	l.account.Fail(account)
+}
+
+func tooManyLogins(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "300")
+	writeErrorCode(w, http.StatusTooManyRequests, "too_many_attempts", "too many failed logins, try again later")
 }
 
 func clientIP(r *http.Request) string {
@@ -87,8 +94,20 @@ func (s *server) login(w http.ResponseWriter, r *http.Request, _ *call) {
 	}
 	ip, account := clientIP(r), strings.ToLower(strings.TrimSpace(in.Email))
 	if s.logins.blocked(ip, account) {
-		w.Header().Set("Retry-After", "300")
-		writeErrorCode(w, http.StatusTooManyRequests, "too_many_attempts", "too many failed logins, try again later")
+		tooManyLogins(w)
+		return
+	}
+	// Wait for a slot, then check again: failures recorded by the attempts
+	// that held the slots meanwhile count. A burst of parallel guesses can
+	// therefore not slip past the limit.
+	select {
+	case s.loginSlots <- struct{}{}:
+		defer func() { <-s.loginSlots }()
+	case <-r.Context().Done():
+		return
+	}
+	if s.logins.blocked(ip, account) {
+		tooManyLogins(w)
 		return
 	}
 	sess, err := s.Auth.Login(r.Context(), in.Email, in.Password)
