@@ -278,12 +278,12 @@ func TestAuthorizationMatrixOverHTTP(t *testing.T) {
 				continue
 			}
 			t.Run(act.name+"/"+r.Method+" "+r.Path, func(t *testing.T) {
-				cap := authz.Capability(r.Capability)
+				capability := authz.Capability(r.Capability)
 				switch {
 				case act.role == authz.RoleNone:
 					resp, body := w.send(act.token, r, w.expand(t, r.Path, absent))
 					expectStatus(t, resp, body, http.StatusNotFound)
-				case !act.role.Allows(cap):
+				case !act.role.Allows(capability):
 					resp, body := w.send(act.token, r, w.expand(t, r.Path, absent))
 					expectStatus(t, resp, body, http.StatusForbidden)
 				case isStream(r):

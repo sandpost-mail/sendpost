@@ -2,10 +2,10 @@ SHELL := /bin/sh
 BIN := bin/sandpost
 COMPOSE := docker compose -f deploy/docker-compose.yml --env-file deploy/.env
 
-.PHONY: help build test lint migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean
+.PHONY: help build test lint openapi migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean
 
 help:
-	@echo "targets: build test lint migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean"
+	@echo "targets: build test lint openapi migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean"
 
 # Build the UI and embed it (internal/webui/dist) in the binary.
 build: web
@@ -16,6 +16,11 @@ test:
 
 lint:
 	golangci-lint run ./...
+
+# Check docs/openapi.yaml against the registered routes and lint it.
+openapi:
+	go test -run 'OpenAPI' -count=1 ./internal/api/
+	npx --yes @redocly/cli@2.64.1 lint docs/openapi.yaml
 
 # Apply migrations to $$DATABASE_URL (see deploy/.env.example, or run `make dev`).
 migrate:

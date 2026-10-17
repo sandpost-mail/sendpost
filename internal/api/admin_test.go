@@ -211,13 +211,13 @@ func TestAPITokens(t *testing.T) {
 		a.mustJSONAs(issued.Secret, http.MethodGet, pp(p.ID, "/messages"), nil, http.StatusUnauthorized, nil)
 	})
 
-	t.Run("garbage and lookalikes", func(t *testing.T) {
+	t.Run("garbage and lookalikes", func(*testing.T) {
 		for _, bad := range []string{"spu_", "spp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sps_whatever", "Bearer", strings.Repeat("a", 5000)} {
 			a.mustJSONAs(bad, http.MethodGet, v1+"/projects", nil, http.StatusUnauthorized, nil)
 		}
 	})
 
-	t.Run("administrator manages tokens of a user", func(t *testing.T) {
+	t.Run("administrator manages tokens of a user", func(*testing.T) {
 		var issued tokens.Issued
 		a.mustJSONAs(owner, http.MethodPost, v1+"/users/me/tokens", map[string]any{"scopes": []string{"read"}}, http.StatusCreated, &issued)
 		a.mustJSON(http.MethodDelete, v1+"/users/"+itoa64(uid)+"/tokens/"+itoa64(issued.ID), nil, http.StatusNoContent, nil)

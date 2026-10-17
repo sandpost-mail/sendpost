@@ -1,6 +1,7 @@
 package authz_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
@@ -94,7 +95,7 @@ func TestGlobal(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := authz.Global(tc.p, authz.CapManageUsers); got != tc.want {
+			if got := authz.Global(tc.p, authz.CapManageUsers); !errors.Is(got, tc.want) {
 				t.Errorf("got %v want %v", got, tc.want)
 			}
 		})
