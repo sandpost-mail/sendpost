@@ -126,6 +126,21 @@ func (s *Service) Get(ctx context.Context, id int64) (User, error) {
 	return User(row), nil
 }
 
+// GetByEmail returns the user with the given email, ignoring case.
+func (s *Service) GetByEmail(ctx context.Context, email string) (User, error) {
+	row, err := sqlcgen.New(s.db).GetUserForLogin(ctx, strings.TrimSpace(email))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("get user by email: %w", err)
+	}
+	return User{
+		ID: row.ID, Email: row.Email, Name: row.Name, IsAdmin: row.IsAdmin,
+		MustChangePassword: row.MustChangePassword, CreatedAt: row.CreatedAt, DisabledAt: row.DisabledAt,
+	}, nil
+}
+
 // List returns every user ordered by email.
 func (s *Service) List(ctx context.Context) ([]User, error) {
 	rows, err := sqlcgen.New(s.db).ListUsers(ctx)

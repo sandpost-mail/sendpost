@@ -2,6 +2,7 @@ package audit_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"testing"
@@ -81,6 +82,35 @@ func TestRecordRollsBackWithTheChange(t *testing.T) {
 	}
 	if page, _ := audit.NewReader(pool).ListAll(ctx, "", 0); len(page.Items) != 0 {
 		t.Errorf("an audit row of a rolled back change survived: %+v", page.Items)
+	}
+}
+
+func TestSourceIsRecordedInDetail(t *testing.T) {
+	pool := testutil.Pool(t)
+	ctx := audit.WithSource(context.Background(), "cli")
+	detail := map[string]any{"k": "v"}
+	err := store.InTx(ctx, pool, func(q *sqlcgen.Queries) error {
+		return audit.Record(ctx, q, audit.Entry{Action: "cli.one", Detail: detail})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail) != 1 {
+		t.Errorf("the caller's detail map was mutated: %v", detail)
+	}
+	page, err := audit.NewReader(pool).ListAll(context.Background(), "", 0)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("list: %+v %v", page, err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(page.Items[0].Detail, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["actor"] != "cli" || got["k"] != "v" || page.Items[0].ActorUserID != nil {
+		t.Errorf("entry: %+v detail %v", page.Items[0], got)
+	}
+	if src, ok := audit.Source(context.Background()); ok || src != "" {
+		t.Errorf("no source expected, got %q", src)
 	}
 }
 
