@@ -76,7 +76,7 @@ curl -b jar -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"n
 
 ### Account recovery (`sandpost admin`)
 
-Run on the server with direct database access (`DATABASE_URL` and `SECRET_KEY`, loaded like `serve`), for example `docker compose exec app sandpost admin ...`. This is how a locked out last administrator recovers.
+Run on the server with direct database access (`DATABASE_URL` and `SECRET_KEY`, loaded like `serve`), with Docker Compose `docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec app /sandpost admin ...` (add `-T` when piping a password with `--password-stdin`). This is how a locked out last administrator recovers.
 
 | Command | Effect |
 |---|---|
