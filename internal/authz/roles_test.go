@@ -101,3 +101,56 @@ func TestGlobal(t *testing.T) {
 		})
 	}
 }
+
+// TestProjectRoleName is the role vocabulary of the API: administrators act as
+// owners, and no access has no name.
+func TestProjectRoleName(t *testing.T) {
+	tests := []struct {
+		role authz.Role
+		want string
+	}{
+		{authz.RoleNone, ""},
+		{authz.RoleViewer, "viewer"},
+		{authz.RoleMember, "member"},
+		{authz.RoleOwner, "owner"},
+		{authz.RoleAdmin, "owner"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.role.String(), func(t *testing.T) {
+			if got := tc.role.ProjectRoleName(); got != tc.want {
+				t.Errorf("ProjectRoleName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUserRole resolves group rank, instance admin flag and token ceiling.
+func TestUserRole(t *testing.T) {
+	tests := []struct {
+		name    string
+		admin   bool
+		ceiling authz.Role
+		rank    int32
+		want    authz.Role
+	}{
+		{"no group role", false, authz.RoleAdmin, 0, authz.RoleNone},
+		{"viewer", false, authz.RoleAdmin, 1, authz.RoleViewer},
+		{"member", false, authz.RoleAdmin, 2, authz.RoleMember},
+		{"owner", false, authz.RoleAdmin, 3, authz.RoleOwner},
+		{"owner capped to read", false, authz.RoleViewer, 3, authz.RoleViewer},
+		{"owner capped to write", false, authz.RoleMember, 3, authz.RoleMember},
+		{"viewer is not lifted by manage", false, authz.RoleAdmin, 1, authz.RoleViewer},
+		{"admin without group role", true, authz.RoleAdmin, 0, authz.RoleAdmin},
+		{"admin capped to read", true, authz.RoleViewer, 0, authz.RoleViewer},
+		{"admin capped to write", true, authz.RoleMember, 3, authz.RoleMember},
+		{"zero ceiling grants nothing", true, authz.RoleNone, 3, authz.RoleNone},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := authz.Principal{Kind: authz.KindSession, UserID: 1, IsAdmin: tc.admin, Ceiling: tc.ceiling}
+			if got := authz.UserRole(p, tc.rank); got != tc.want {
+				t.Errorf("UserRole() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}

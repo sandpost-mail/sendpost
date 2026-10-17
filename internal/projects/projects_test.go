@@ -133,3 +133,57 @@ func TestDatabaseErrors(t *testing.T) {
 		t.Error("delete rule")
 	}
 }
+
+// TestListVisibleRanksOneRowPerProject is table-driven over group setups: a
+// user sees only projects they have a group on, once, with the highest rank.
+func TestListVisibleRanksOneRowPerProject(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.Pool(t)
+	svc := projects.New(pool)
+	user := testutil.User(t, pool, "u@example.test", false)
+	other := testutil.User(t, pool, "o@example.test", false)
+
+	tests := []struct {
+		slug  string
+		roles []string // one group per role, the user is in all of them
+		want  int32    // 0 means not listed
+	}{
+		{"alpha", []string{"viewer"}, 1},
+		{"bravo", []string{"member"}, 2},
+		{"charlie", []string{"viewer", "owner", "member"}, 3},
+		{"delta", nil, 0},
+	}
+	for _, tc := range tests {
+		pid := testutil.Project(t, pool, tc.slug)
+		for i, role := range tc.roles {
+			g := testutil.Group(t, pool, tc.slug+"-"+role+"-"+string(rune('a'+i)))
+			testutil.Assign(t, pool, pid, g, role)
+			testutil.Member(t, pool, g, user)
+		}
+	}
+	// A group the user is not in must not leak a role.
+	pid := testutil.Project(t, pool, "echo")
+	g := testutil.Group(t, pool, "echo-owner")
+	testutil.Assign(t, pool, pid, g, "owner")
+	testutil.Member(t, pool, g, other)
+
+	got, err := svc.ListVisible(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ranks := map[string]int32{}
+	for _, v := range got {
+		if _, dup := ranks[v.Project.Slug]; dup {
+			t.Errorf("%s listed twice", v.Project.Slug)
+		}
+		ranks[v.Project.Slug] = v.Rank
+	}
+	for _, tc := range tests {
+		if ranks[tc.slug] != tc.want {
+			t.Errorf("%s: rank %d, want %d", tc.slug, ranks[tc.slug], tc.want)
+		}
+	}
+	if _, ok := ranks["echo"]; ok {
+		t.Error("a project of another user's group is listed")
+	}
+}
