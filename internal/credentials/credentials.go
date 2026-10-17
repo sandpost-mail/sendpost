@@ -19,6 +19,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sandpost-mail/sandpost/internal/audit"
+	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
@@ -67,20 +69,21 @@ type Identity struct {
 
 // Service manages SMTP credentials.
 type Service struct {
+	db  store.DB
 	q   *sqlcgen.Queries
 	key []byte
 }
 
 // New returns a Service. secretKey is the instance SECRET_KEY, a dedicated
 // HMAC key is derived from it.
-func New(db sqlcgen.DBTX, secretKey string) *Service {
+func New(db store.DB, secretKey string) *Service {
 	mac := hmac.New(sha256.New, []byte(secretKey))
 	mac.Write([]byte(keyContext))
-	return &Service{q: sqlcgen.New(db), key: mac.Sum(nil)}
+	return &Service{db: db, q: sqlcgen.New(db), key: mac.Sum(nil)}
 }
 
-// Create generates a username and secret for projectID.
-func (s *Service) Create(ctx context.Context, projectID int64, label string) (Issued, error) {
+// Create generates a username and secret for the scope's project.
+func (s *Service) Create(ctx context.Context, scope authz.Scope, label string) (Issued, error) {
 	label = strings.TrimSpace(label)
 	if len([]rune(label)) > maxLabelLength {
 		return Issued{}, ErrLabelTooLong
@@ -96,11 +99,22 @@ func (s *Service) Create(ctx context.Context, projectID int64, label string) (Is
 	username := usernamePrefix + strings.ToLower(usernameEncoding.EncodeToString(userRaw))
 	secret := secretPrefix + base64.RawURLEncoding.EncodeToString(secretRaw)
 
-	row, err := s.q.CreateCredential(ctx, sqlcgen.CreateCredentialParams{
-		ProjectID:  projectID,
-		Username:   username,
-		SecretHmac: s.digest(secret),
-		Label:      label,
+	var row sqlcgen.CreateCredentialRow
+	err = store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
+		var err error
+		row, err = q.CreateCredential(ctx, sqlcgen.CreateCredentialParams{
+			ProjectID:  scope.ProjectID(),
+			Username:   username,
+			SecretHmac: s.digest(secret),
+			Label:      label,
+		})
+		if err != nil {
+			return err
+		}
+		return audit.Record(ctx, q, audit.Entry{
+			Action: "credential.create", ProjectID: scope.ProjectID(), Target: fmt.Sprintf("credential:%d", row.ID),
+			Detail: map[string]any{"username": username, "label": label},
+		})
 	})
 	if store.IsForeignKeyViolation(err) {
 		return Issued{}, ErrProjectNotFound
@@ -118,8 +132,8 @@ func (s *Service) Create(ctx context.Context, projectID int64, label string) (Is
 }
 
 // List returns every credential of a project, newest first.
-func (s *Service) List(ctx context.Context, projectID int64) ([]Credential, error) {
-	rows, err := s.q.ListCredentials(ctx, projectID)
+func (s *Service) List(ctx context.Context, scope authz.Scope) ([]Credential, error) {
+	rows, err := s.q.ListCredentials(ctx, scope.ProjectID())
 	if err != nil {
 		return nil, fmt.Errorf("list credentials: %w", err)
 	}
@@ -135,13 +149,24 @@ func (s *Service) List(ctx context.Context, projectID int64) ([]Credential, erro
 
 // Revoke disables a credential. It returns ErrNotFound when the credential does
 // not exist in the project or is already revoked.
-func (s *Service) Revoke(ctx context.Context, projectID, id int64) error {
-	n, err := s.q.RevokeCredential(ctx, sqlcgen.RevokeCredentialParams{ProjectID: projectID, ID: id})
+func (s *Service) Revoke(ctx context.Context, scope authz.Scope, id int64) error {
+	err := store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
+		n, err := q.RevokeCredential(ctx, sqlcgen.RevokeCredentialParams{ProjectID: scope.ProjectID(), ID: id})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return audit.Record(ctx, q, audit.Entry{
+			Action: "credential.revoke", ProjectID: scope.ProjectID(), Target: fmt.Sprintf("credential:%d", id),
+		})
+	})
+	if errors.Is(err, ErrNotFound) {
+		return err
+	}
 	if err != nil {
 		return fmt.Errorf("revoke credential: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
 	}
 	return nil
 }

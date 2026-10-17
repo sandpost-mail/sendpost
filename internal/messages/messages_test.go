@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/messages"
 	"github.com/sandpost-mail/sandpost/internal/search"
@@ -53,7 +54,7 @@ func list(t *testing.T, e env, project int64, q string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := e.repo.List(context.Background(), project, query, "", 100)
+	page, err := e.repo.List(context.Background(), authz.Trusted(project), query, "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestPagination(t *testing.T) {
 	var seen []string
 	cursor := ""
 	for pages := 0; pages < 10; pages++ {
-		page, err := e.repo.List(ctx, e.pid, search.Query{}, cursor, 2)
+		page, err := e.repo.List(ctx, authz.Trusted(e.pid), search.Query{}, cursor, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,18 +156,18 @@ func TestPagination(t *testing.T) {
 		t.Errorf("paged order: %v", seen)
 	}
 
-	if _, err := e.repo.List(ctx, e.pid, search.Query{}, "garbage!", 2); !errors.Is(err, messages.ErrInvalidCursor) {
+	if _, err := e.repo.List(ctx, authz.Trusted(e.pid), search.Query{}, "garbage!", 2); !errors.Is(err, messages.ErrInvalidCursor) {
 		t.Errorf("bad cursor: %v", err)
 	}
 	for _, bad := range []string{"bm90LWEtY3Vyc29y", "YTpi"} { // "not-a-cursor", "a:b"
-		if _, err := e.repo.List(ctx, e.pid, search.Query{}, bad, 2); !errors.Is(err, messages.ErrInvalidCursor) {
+		if _, err := e.repo.List(ctx, authz.Trusted(e.pid), search.Query{}, bad, 2); !errors.Is(err, messages.ErrInvalidCursor) {
 			t.Errorf("%q: %v", bad, err)
 		}
 	}
-	if page, _ := e.repo.List(ctx, e.pid, search.Query{}, "", 0); len(page.Items) != 5 {
+	if page, _ := e.repo.List(ctx, authz.Trusted(e.pid), search.Query{}, "", 0); len(page.Items) != 5 {
 		t.Errorf("default limit: %d", len(page.Items))
 	}
-	if page, _ := e.repo.List(ctx, e.pid, search.Query{}, "", 100000); len(page.Items) != 5 {
+	if page, _ := e.repo.List(ctx, authz.Trusted(e.pid), search.Query{}, "", 100000); len(page.Items) != 5 {
 		t.Errorf("max limit clamp: %d", len(page.Items))
 	}
 }
@@ -184,7 +185,7 @@ func TestGetAndFriends(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d, err := e.repo.Get(ctx, e.pid, id)
+	d, err := e.repo.Get(ctx, authz.Trusted(e.pid), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,43 +199,43 @@ func TestGetAndFriends(t *testing.T) {
 		t.Error("new message must be unread")
 	}
 
-	got, err := e.repo.Raw(ctx, e.pid, id)
+	got, err := e.repo.Raw(ctx, authz.Trusted(e.pid), id)
 	if err != nil || string(got) != string(raw) {
 		t.Errorf("raw: %v", err)
 	}
-	html, err := e.repo.HTML(ctx, e.pid, id)
+	html, err := e.repo.HTML(ctx, authz.Trusted(e.pid), id)
 	if err != nil || !strings.Contains(html, "cid:logo123") {
 		t.Errorf("html: %q %v", html, err)
 	}
-	a, content, err := e.repo.AttachmentContent(ctx, e.pid, id, 0)
+	a, content, err := e.repo.AttachmentContent(ctx, authz.Trusted(e.pid), id, 0)
 	if err != nil || a.Filename != "report.pdf" || string(content) != "%PDF-1.4 fake pdf bytes" {
 		t.Errorf("attachment: %+v %q %v", a, content, err)
 	}
-	if _, _, err := e.repo.AttachmentContent(ctx, e.pid, id, 9); !errors.Is(err, messages.ErrNotFound) {
+	if _, _, err := e.repo.AttachmentContent(ctx, authz.Trusted(e.pid), id, 9); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("missing attachment: %v", err)
 	}
 
-	if err := e.repo.MarkRead(ctx, e.pid, id); err != nil {
+	if err := e.repo.MarkRead(ctx, authz.Trusted(e.pid), id); err != nil {
 		t.Fatal(err)
 	}
-	if d, _ := e.repo.Get(ctx, e.pid, id); d.ReadAt == nil {
+	if d, _ := e.repo.Get(ctx, authz.Trusted(e.pid), id); d.ReadAt == nil {
 		t.Error("read_at not set")
 	}
 
 	// Another project must see nothing at all, for every accessor.
-	if _, err := e.repo.Get(ctx, other, id); !errors.Is(err, messages.ErrNotFound) {
+	if _, err := e.repo.Get(ctx, authz.Trusted(other), id); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("get across projects: %v", err)
 	}
-	if _, err := e.repo.Raw(ctx, other, id); !errors.Is(err, messages.ErrNotFound) {
+	if _, err := e.repo.Raw(ctx, authz.Trusted(other), id); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("raw across projects: %v", err)
 	}
-	if _, err := e.repo.HTML(ctx, other, id); !errors.Is(err, messages.ErrNotFound) {
+	if _, err := e.repo.HTML(ctx, authz.Trusted(other), id); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("html across projects: %v", err)
 	}
-	if _, _, err := e.repo.AttachmentContent(ctx, other, id, 0); !errors.Is(err, messages.ErrNotFound) {
+	if _, _, err := e.repo.AttachmentContent(ctx, authz.Trusted(other), id, 0); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("attachment across projects: %v", err)
 	}
-	if err := e.repo.MarkRead(ctx, other, id); err != nil {
+	if err := e.repo.MarkRead(ctx, authz.Trusted(other), id); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -243,19 +244,19 @@ func TestDatabaseErrors(t *testing.T) {
 	e := newEnv(t)
 	e.pool.Close()
 	ctx := context.Background()
-	if _, err := e.repo.List(ctx, 1, search.Query{}, "", 1); err == nil {
+	if _, err := e.repo.List(ctx, authz.Trusted(1), search.Query{}, "", 1); err == nil {
 		t.Error("list")
 	}
-	if _, err := e.repo.Get(ctx, 1, 1); err == nil || errors.Is(err, messages.ErrNotFound) {
+	if _, err := e.repo.Get(ctx, authz.Trusted(1), 1); err == nil || errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("get: %v", err)
 	}
-	if _, err := e.repo.Raw(ctx, 1, 1); err == nil || errors.Is(err, messages.ErrNotFound) {
+	if _, err := e.repo.Raw(ctx, authz.Trusted(1), 1); err == nil || errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("raw: %v", err)
 	}
-	if _, err := e.repo.HTML(ctx, 1, 1); err == nil || errors.Is(err, messages.ErrNotFound) {
+	if _, err := e.repo.HTML(ctx, authz.Trusted(1), 1); err == nil || errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("html: %v", err)
 	}
-	if err := e.repo.MarkRead(ctx, 1, 1); err == nil {
+	if err := e.repo.MarkRead(ctx, authz.Trusted(1), 1); err == nil {
 		t.Error("mark read")
 	}
 }
@@ -280,7 +281,7 @@ func TestListScalesWithIndexes(t *testing.T) {
 	}
 	q, _ := search.Parse("from:user19999")
 	start := time.Now()
-	page, err := e.repo.List(ctx, e.pid, q, "", 50)
+	page, err := e.repo.List(ctx, authz.Trusted(e.pid), q, "", 50)
 	if err != nil || len(page.Items) != 1 {
 		t.Fatalf("%v %d", err, len(page.Items))
 	}

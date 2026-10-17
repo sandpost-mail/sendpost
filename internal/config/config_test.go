@@ -241,6 +241,31 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestCookieSecure(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{"", false, false},
+		{"true", true, false},
+		{"1", true, false},
+		{"false", false, false},
+		{"maybe", false, true},
+	}
+	for _, tc := range tests {
+		t.Run("COOKIE_SECURE="+tc.raw, func(t *testing.T) {
+			c, err := Load(envFrom(with(base(), "COOKIE_SECURE", tc.raw)))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err == nil && c.CookieSecure != tc.want {
+				t.Errorf("CookieSecure = %v, want %v", c.CookieSecure, tc.want)
+			}
+		})
+	}
+}
+
 func writeFile(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "sandpost.env")

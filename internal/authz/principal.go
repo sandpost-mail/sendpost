@@ -1,5 +1,7 @@
 package authz
 
+import "time"
+
 // Kind says how a principal authenticated.
 type Kind string
 
@@ -28,6 +30,9 @@ type Principal struct {
 	TokenID int64
 	// SessionID identifies the session (the stored HMAC), for logout and CSRF.
 	SessionID []byte
+	// ExpiresAt is when a session ends, zero for tokens. Long lived streams
+	// close at that moment.
+	ExpiresAt time.Time
 }
 
 // IsUser reports whether the principal acts for a user, as opposed to a

@@ -14,15 +14,20 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sandpost-mail/sandpost/internal/api"
+	"github.com/sandpost-mail/sandpost/internal/audit"
+	"github.com/sandpost-mail/sandpost/internal/auth"
+	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/config"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/events"
+	"github.com/sandpost-mail/sandpost/internal/groups"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/logging"
 	"github.com/sandpost-mail/sandpost/internal/messages"
 	"github.com/sandpost-mail/sandpost/internal/projects"
 	"github.com/sandpost-mail/sandpost/internal/smtpd"
 	"github.com/sandpost-mail/sandpost/internal/store"
+	"github.com/sandpost-mail/sandpost/internal/tokens"
 	"github.com/sandpost-mail/sandpost/internal/users"
 	"github.com/sandpost-mail/sandpost/internal/webui"
 )
@@ -58,15 +63,27 @@ func runServe(ctx context.Context, e env) error {
 		return err
 	}
 	bus := events.NewBus(cfg.DatabaseURL, log)
+	authSvc, err := auth.NewService(pool, cfg.SecretKey)
+	if err != nil {
+		return err
+	}
 	handler := api.NewHandler(api.Deps{
-		DB:          pool,
-		Projects:    projects.New(pool),
-		Credentials: credentials.New(pool, cfg.SecretKey),
-		Messages:    messages.New(pool),
-		Bus:         bus,
-		Info:        serverInfo(cfg),
-		UI:          webui.Handler(),
-		Log:         log,
+		DB:           pool,
+		Authz:        authz.New(pool),
+		Auth:         authSvc,
+		Tokens:       tokens.NewService(pool, cfg.SecretKey),
+		Users:        users.NewService(pool),
+		Groups:       groups.NewService(pool),
+		Audit:        audit.NewReader(pool),
+		Signer:       authz.NewSigner(cfg.SecretKey),
+		Projects:     projects.New(pool),
+		Credentials:  credentials.New(pool, cfg.SecretKey),
+		Messages:     messages.New(pool),
+		Bus:          bus,
+		Info:         serverInfo(cfg),
+		CookieSecure: cfg.CookieSecure,
+		UI:           webui.Handler(),
+		Log:          log,
 	})
 
 	lc := &net.ListenConfig{}

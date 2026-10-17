@@ -49,8 +49,11 @@ type Config struct {
 	AdminEmail      string
 	AdminPassword   string
 	MaxMessageBytes int64
-	LogLevel        slog.Level
-	LogFormat       string
+	// CookieSecure marks the UI session cookie Secure. Enable it whenever
+	// users reach the UI over HTTPS, including behind a TLS terminating proxy.
+	CookieSecure bool
+	LogLevel     slog.Level
+	LogFormat    string
 }
 
 // LogValue implements slog.LogValuer and never exposes secrets.
@@ -62,6 +65,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("SMTPTLSMode", c.SMTPTLSMode),
 		slog.Bool("AdminBootstrap", c.AdminEmail != ""),
 		slog.Int64("MaxMessageBytes", c.MaxMessageBytes),
+		slog.Bool("CookieSecure", c.CookieSecure),
 		slog.String("LogLevel", c.LogLevel.String()),
 		slog.String("LogFormat", c.LogFormat),
 	)
@@ -153,6 +157,13 @@ func build(get func(string) string) (Config, error) {
 		default:
 			c.MaxMessageBytes = n
 		}
+	}
+	if raw := get("COOKIE_SECURE"); raw != "" {
+		secure, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, errors.New("COOKIE_SECURE must be true or false"))
+		}
+		c.CookieSecure = secure
 	}
 	if raw := get("LOG_LEVEL"); raw != "" {
 		if err := c.LogLevel.UnmarshalText([]byte(raw)); err != nil {

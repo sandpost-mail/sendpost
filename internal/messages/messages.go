@@ -1,5 +1,5 @@
 // Package messages is the project scoped read side of captured mail. Every
-// method takes a project id and only returns rows of that project.
+// method takes an authz.Scope and only returns rows of that project.
 package messages
 
 import (
@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/search"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
@@ -95,14 +96,14 @@ func New(db sqlcgen.DBTX) *Repository { return &Repository{q: sqlcgen.New(db)} }
 
 // List returns one page of the project's messages, newest first, filtered by
 // query. cursor is the NextCursor of the previous page, or empty.
-func (r *Repository) List(ctx context.Context, projectID int64, query search.Query, cursor string, limit int) (Page, error) {
+func (r *Repository) List(ctx context.Context, scope authz.Scope, query search.Query, cursor string, limit int) (Page, error) {
 	switch {
 	case limit <= 0:
 		limit = DefaultLimit
 	case limit > MaxLimit:
 		limit = MaxLimit
 	}
-	params := listParams(projectID, query, limit+1)
+	params := listParams(scope.ProjectID(), query, limit+1)
 	if cursor != "" {
 		at, id, err := decodeCursor(cursor)
 		if err != nil {
@@ -158,8 +159,8 @@ func nonNil(s []string) []string {
 }
 
 // Get returns a message with its recipients, attachments, links and tags.
-func (r *Repository) Get(ctx context.Context, projectID, id int64) (Detail, error) {
-	m, err := r.q.GetMessage(ctx, sqlcgen.GetMessageParams{ProjectID: projectID, ID: id})
+func (r *Repository) Get(ctx context.Context, scope authz.Scope, id int64) (Detail, error) {
+	m, err := r.q.GetMessage(ctx, sqlcgen.GetMessageParams{ProjectID: scope.ProjectID(), ID: id})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Detail{}, ErrNotFound
 	}
@@ -219,8 +220,8 @@ func (r *Repository) attachments(ctx context.Context, id int64) ([]Attachment, e
 }
 
 // Raw returns the original message bytes.
-func (r *Repository) Raw(ctx context.Context, projectID, id int64) ([]byte, error) {
-	raw, err := r.q.GetMessageRaw(ctx, sqlcgen.GetMessageRawParams{ProjectID: projectID, ID: id})
+func (r *Repository) Raw(ctx context.Context, scope authz.Scope, id int64) ([]byte, error) {
+	raw, err := r.q.GetMessageRaw(ctx, sqlcgen.GetMessageRawParams{ProjectID: scope.ProjectID(), ID: id})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -231,8 +232,8 @@ func (r *Repository) Raw(ctx context.Context, projectID, id int64) ([]byte, erro
 }
 
 // HTML returns the HTML body, "" when the message has none.
-func (r *Repository) HTML(ctx context.Context, projectID, id int64) (string, error) {
-	html, err := r.q.GetMessageHTML(ctx, sqlcgen.GetMessageHTMLParams{ProjectID: projectID, ID: id})
+func (r *Repository) HTML(ctx context.Context, scope authz.Scope, id int64) (string, error) {
+	html, err := r.q.GetMessageHTML(ctx, sqlcgen.GetMessageHTMLParams{ProjectID: scope.ProjectID(), ID: id})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -244,8 +245,8 @@ func (r *Repository) HTML(ctx context.Context, projectID, id int64) (string, err
 
 // AttachmentContent returns the metadata and decoded bytes of one attachment,
 // read back out of the stored raw message.
-func (r *Repository) AttachmentContent(ctx context.Context, projectID, id int64, ordinal int) (Attachment, []byte, error) {
-	raw, err := r.Raw(ctx, projectID, id)
+func (r *Repository) AttachmentContent(ctx context.Context, scope authz.Scope, id int64, ordinal int) (Attachment, []byte, error) {
+	raw, err := r.Raw(ctx, scope, id)
 	if err != nil {
 		return Attachment{}, nil, err
 	}
@@ -260,8 +261,8 @@ func (r *Repository) AttachmentContent(ctx context.Context, projectID, id int64,
 }
 
 // MarkRead sets read_at on the first view. It is a no-op when already read.
-func (r *Repository) MarkRead(ctx context.Context, projectID, id int64) error {
-	if err := r.q.MarkMessageRead(ctx, sqlcgen.MarkMessageReadParams{ProjectID: projectID, ID: id}); err != nil {
+func (r *Repository) MarkRead(ctx context.Context, scope authz.Scope, id int64) error {
+	if err := r.q.MarkMessageRead(ctx, sqlcgen.MarkMessageReadParams{ProjectID: scope.ProjectID(), ID: id}); err != nil {
 		return fmt.Errorf("mark read: %w", err)
 	}
 	return nil
