@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sandpost-mail/sandpost/internal/passwords"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
 
@@ -15,6 +16,22 @@ func User(t *testing.T, pool *pgxpool.Pool, email string, admin bool) int64 {
 	t.Helper()
 	u, err := sqlcgen.New(pool).CreateUser(context.Background(), sqlcgen.CreateUserParams{
 		Email: email, Name: email, PasswordHash: "!", IsAdmin: admin,
+	})
+	if err != nil {
+		t.Fatalf("create user %q: %v", email, err)
+	}
+	return u.ID
+}
+
+// UserWithPassword inserts a user that can really log in with password.
+func UserWithPassword(t *testing.T, pool *pgxpool.Pool, email, password string, admin, mustChange bool) int64 {
+	t.Helper()
+	hash, err := passwords.Hash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := sqlcgen.New(pool).CreateUser(context.Background(), sqlcgen.CreateUserParams{
+		Email: email, Name: email, PasswordHash: hash, IsAdmin: admin, MustChangePassword: mustChange,
 	})
 	if err != nil {
 		t.Fatalf("create user %q: %v", email, err)

@@ -260,10 +260,23 @@ func (r *Repository) AttachmentContent(ctx context.Context, scope authz.Scope, i
 	}, content, nil
 }
 
-// MarkRead sets read_at on the first view. It is a no-op when already read.
+// MarkRead sets read_at on the first view. It is a no-op when already read and
+// ErrNotFound when the message is not in the project.
 func (r *Repository) MarkRead(ctx context.Context, scope authz.Scope, id int64) error {
-	if err := r.q.MarkMessageRead(ctx, sqlcgen.MarkMessageReadParams{ProjectID: scope.ProjectID(), ID: id}); err != nil {
+	p := sqlcgen.MarkMessageReadParams{ProjectID: scope.ProjectID(), ID: id}
+	n, err := r.q.MarkMessageRead(ctx, p)
+	if err != nil {
 		return fmt.Errorf("mark read: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	exists, err := r.q.MessageExists(ctx, sqlcgen.MessageExistsParams(p))
+	if err != nil {
+		return fmt.Errorf("mark read: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
 	}
 	return nil
 }

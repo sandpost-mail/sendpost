@@ -235,8 +235,8 @@ func TestGetAndFriends(t *testing.T) {
 	if _, _, err := e.repo.AttachmentContent(ctx, authz.Trusted(other), id, 0); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("attachment across projects: %v", err)
 	}
-	if err := e.repo.MarkRead(ctx, authz.Trusted(other), id); err != nil {
-		t.Fatal(err)
+	if err := e.repo.MarkRead(ctx, authz.Trusted(other), id); !errors.Is(err, messages.ErrNotFound) {
+		t.Errorf("mark read across projects: %v", err)
 	}
 }
 

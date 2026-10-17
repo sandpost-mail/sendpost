@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,7 +47,7 @@ type app struct {
 	token string
 }
 
-func newApp(t *testing.T) *app {
+func newApp(t *testing.T, opts ...func(*api.Deps)) *app {
 	t.Helper()
 	dsn := testutil.PostgresDSN(t)
 	pool := testutil.PoolFor(t, dsn)
@@ -65,7 +66,7 @@ func newApp(t *testing.T) *app {
 		t.Fatal(err)
 	}
 	toks := tokens.NewService(pool, testSecretKey)
-	h := api.NewHandler(api.Deps{
+	deps := api.Deps{
 		DB: pool, Authz: authz.New(pool), Auth: authSvc, Tokens: toks,
 		Users: users.NewService(pool), Groups: groups.NewService(pool), Audit: audit.NewReader(pool),
 		Signer:   authz.NewSigner(testSecretKey),
@@ -73,8 +74,11 @@ func newApp(t *testing.T) *app {
 		Messages: messages.New(pool), Bus: bus, Log: log,
 		Info: api.ServerInfo{SMTPPort: 1025, SMTPTLSMode: "off", Version: "test"},
 		UI:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ui")) }),
-	})
-	srv := httptest.NewServer(h)
+	}
+	for _, opt := range opts {
+		opt(&deps)
+	}
+	srv := httptest.NewServer(api.NewHandler(deps))
 	t.Cleanup(srv.Close)
 	a := &app{t: t, pool: pool, srv: srv, ing: ingest.NewService(pool), toks: toks}
 	a.admin = testutil.User(t, pool, "admin@example.test", true)
@@ -171,6 +175,8 @@ func (a *app) capture(pid int64, fixtureName string) int64 {
 	}
 	return id
 }
+
+func itoa64(n int64) string { return strconv.FormatInt(n, 10) }
 
 func pp(pid int64, format string, args ...any) string {
 	return fmt.Sprintf("%s/projects/%d", api.V1Prefix, pid) + fmt.Sprintf(format, args...)

@@ -247,7 +247,7 @@ func TestCrossProjectIsolation(t *testing.T) {
 		}
 	}
 	resp, _ := a.do(http.MethodPost, pp(intruder.ID, "/messages/%d/read", mid), map[string]string{})
-	if resp.StatusCode != http.StatusNoContent { // no-op by construction
+	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("read: %d", resp.StatusCode)
 	}
 	var d messages.Detail
