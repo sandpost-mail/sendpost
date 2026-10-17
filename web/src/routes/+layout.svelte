@@ -32,6 +32,8 @@
   });
 </script>
 
+<svelte:head><title>Sandpost</title></svelte:head>
+
 <div class="app">
   <header class="topbar">
     <a class="brand" href="/">Sandpost</a>
