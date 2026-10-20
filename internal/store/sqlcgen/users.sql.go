@@ -7,6 +7,9 @@ package sqlcgen
 
 import (
 	"context"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const countUsers = `-- name: CountUsers :one
@@ -38,4 +41,247 @@ func (q *Queries) CreateAdminIfNoUsers(ctx context.Context, arg CreateAdminIfNoU
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const createUser = `-- name: CreateUser :one
+INSERT INTO users (email, name, password_hash, is_admin, must_change_password)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, email, name, is_admin, must_change_password, created_at, disabled_at
+`
+
+type CreateUserParams struct {
+	Email              string
+	Name               string
+	PasswordHash       string
+	IsAdmin            bool
+	MustChangePassword bool
+}
+
+type CreateUserRow struct {
+	ID                 int64
+	Email              string
+	Name               string
+	IsAdmin            bool
+	MustChangePassword bool
+	CreatedAt          time.Time
+	DisabledAt         *time.Time
+}
+
+func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error) {
+	row := q.db.QueryRow(ctx, createUser,
+		arg.Email,
+		arg.Name,
+		arg.PasswordHash,
+		arg.IsAdmin,
+		arg.MustChangePassword,
+	)
+	var i CreateUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.IsAdmin,
+		&i.MustChangePassword,
+		&i.CreatedAt,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
+const getUser = `-- name: GetUser :one
+SELECT id, email, name, is_admin, must_change_password, created_at, disabled_at
+FROM users WHERE id = $1
+`
+
+type GetUserRow struct {
+	ID                 int64
+	Email              string
+	Name               string
+	IsAdmin            bool
+	MustChangePassword bool
+	CreatedAt          time.Time
+	DisabledAt         *time.Time
+}
+
+func (q *Queries) GetUser(ctx context.Context, id int64) (GetUserRow, error) {
+	row := q.db.QueryRow(ctx, getUser, id)
+	var i GetUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.IsAdmin,
+		&i.MustChangePassword,
+		&i.CreatedAt,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
+const getUserForLogin = `-- name: GetUserForLogin :one
+SELECT id, email, name, password_hash, is_admin, must_change_password, created_at, disabled_at
+FROM users WHERE lower(email) = lower($1::text)
+`
+
+func (q *Queries) GetUserForLogin(ctx context.Context, email string) (User, error) {
+	row := q.db.QueryRow(ctx, getUserForLogin, email)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.PasswordHash,
+		&i.IsAdmin,
+		&i.MustChangePassword,
+		&i.CreatedAt,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
+const getUserPasswordHash = `-- name: GetUserPasswordHash :one
+SELECT password_hash FROM users WHERE id = $1
+`
+
+func (q *Queries) GetUserPasswordHash(ctx context.Context, id int64) (string, error) {
+	row := q.db.QueryRow(ctx, getUserPasswordHash, id)
+	var password_hash string
+	err := row.Scan(&password_hash)
+	return password_hash, err
+}
+
+const listUsers = `-- name: ListUsers :many
+SELECT id, email, name, is_admin, must_change_password, created_at, disabled_at
+FROM users ORDER BY lower(email), id
+`
+
+type ListUsersRow struct {
+	ID                 int64
+	Email              string
+	Name               string
+	IsAdmin            bool
+	MustChangePassword bool
+	CreatedAt          time.Time
+	DisabledAt         *time.Time
+}
+
+func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
+	rows, err := q.db.Query(ctx, listUsers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersRow
+	for rows.Next() {
+		var i ListUsersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.MustChangePassword,
+			&i.CreatedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockActiveAdmins = `-- name: LockActiveAdmins :many
+SELECT id FROM users WHERE is_admin AND disabled_at IS NULL ORDER BY id FOR UPDATE
+`
+
+// Locks the active admins for the rest of the transaction, so concurrent
+// demotions can not both pass the "last admin" check.
+func (q *Queries) LockActiveAdmins(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.Query(ctx, lockActiveAdmins)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const setUserPassword = `-- name: SetUserPassword :execrows
+UPDATE users SET password_hash = $2, must_change_password = $3 WHERE id = $1
+`
+
+type SetUserPasswordParams struct {
+	ID                 int64
+	PasswordHash       string
+	MustChangePassword bool
+}
+
+func (q *Queries) SetUserPassword(ctx context.Context, arg SetUserPasswordParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setUserPassword, arg.ID, arg.PasswordHash, arg.MustChangePassword)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateUser = `-- name: UpdateUser :one
+UPDATE users SET
+    name        = COALESCE($1::text, name),
+    is_admin    = COALESCE($2::boolean, is_admin),
+    disabled_at = CASE
+        WHEN $3::boolean IS NULL THEN disabled_at
+        WHEN $3::boolean THEN COALESCE(disabled_at, now())
+        ELSE NULL END
+WHERE id = $4
+RETURNING id, email, name, is_admin, must_change_password, created_at, disabled_at
+`
+
+type UpdateUserParams struct {
+	Name     pgtype.Text
+	IsAdmin  pgtype.Bool
+	Disabled pgtype.Bool
+	ID       int64
+}
+
+type UpdateUserRow struct {
+	ID                 int64
+	Email              string
+	Name               string
+	IsAdmin            bool
+	MustChangePassword bool
+	CreatedAt          time.Time
+	DisabledAt         *time.Time
+}
+
+func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (UpdateUserRow, error) {
+	row := q.db.QueryRow(ctx, updateUser,
+		arg.Name,
+		arg.IsAdmin,
+		arg.Disabled,
+		arg.ID,
+	)
+	var i UpdateUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.IsAdmin,
+		&i.MustChangePassword,
+		&i.CreatedAt,
+		&i.DisabledAt,
+	)
+	return i, err
 }

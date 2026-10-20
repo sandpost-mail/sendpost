@@ -11,16 +11,19 @@ import (
 
 const keepAliveInterval = 25 * time.Second
 
-// streamEvents is the SSE endpoint of a project. It first sends "ready" once
-// the bus is LISTENing, so a client that refetches on "ready" cannot miss a
-// message published in between. "resync" means events may have been missed.
-func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, pid int64) {
+// streamEvents is the SSE endpoint of a project. Access was checked by the
+// guard before this runs, so no LISTEN is opened for an unauthorized caller.
+// It first sends "ready" once the bus is LISTENing, so a client that refetches
+// on "ready" cannot miss a message published in between. "resync" means events
+// may have been missed. A stream of a browser session ends when the session
+// expires, the client then fails to reconnect and shows the login page.
+func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, c *call) {
 	flusher, ok := w.(http.Flusher)
 	if !ok || s.Bus == nil {
 		writeError(w, http.StatusNotImplemented, "event streaming is not available")
 		return
 	}
-	sub := s.Bus.Subscribe(pid)
+	sub := s.Bus.Subscribe(c.scope.ProjectID())
 	defer sub.Close()
 
 	h := w.Header()
@@ -39,9 +42,17 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, pid int64)
 	}
 	tick := time.NewTicker(keepAliveInterval)
 	defer tick.Stop()
+	var expired <-chan time.Time
+	if !c.p.ExpiresAt.IsZero() {
+		timer := time.NewTimer(time.Until(c.p.ExpiresAt))
+		defer timer.Stop()
+		expired = timer.C
+	}
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-expired:
 			return
 		case ev := <-sub.C:
 			if !writeEvent(w, flusher, ev) {

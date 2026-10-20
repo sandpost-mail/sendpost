@@ -49,6 +49,8 @@ Status: 1.1 to 1.11 implemented (see ARCHITECTURE, M1 implementation notes). Int
 
 Exit criteria: two groups with different roles on two projects only see what they should, proven by tests.
 
+Status: 2.1 to 2.9 implemented (see ARCHITECTURE, M2 implementation notes and M2 UI notes). The cross-tenant suite proves the exit criteria at the API level (`internal/api/access_test.go`).
+
 ## M3. Mailpit-compatible API
 
 | ID | Item | Size |

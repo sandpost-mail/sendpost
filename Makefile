@@ -2,10 +2,10 @@ SHELL := /bin/sh
 BIN := bin/sandpost
 COMPOSE := docker compose -f deploy/docker-compose.yml --env-file deploy/.env
 
-.PHONY: help build test lint migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean
+.PHONY: help build test lint openapi migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean
 
 help:
-	@echo "targets: build test lint migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean"
+	@echo "targets: build test lint openapi migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean"
 
 # Build the UI and embed it (internal/webui/dist) in the binary.
 build: web
@@ -16,6 +16,11 @@ test:
 
 lint:
 	golangci-lint run ./...
+
+# Check docs/openapi.yaml against the registered routes and lint it.
+openapi:
+	go test -run 'OpenAPI' -count=1 ./internal/api/
+	npx --yes @redocly/cli@2.64.1 lint docs/openapi.yaml
 
 # Apply migrations to $$DATABASE_URL (see deploy/.env.example, or run `make dev`).
 migrate:
@@ -45,11 +50,14 @@ deploy/.env:
 	@printf 'SECRET_KEY=%s\nPOSTGRES_PASSWORD=sandpost\n' "$$(openssl rand -hex 32)" > $@
 	@echo "created $@ with a random SECRET_KEY"
 
-# Start Postgres in Docker, migrate, and run the server locally.
+# Start Postgres in Docker, migrate, and run the server locally. The dev targets
+# default COOKIE_SECURE to false (plain http, works in every browser and on LAN
+# addresses); set COOKIE_SECURE=true in the environment to test the Secure cookie.
 dev: deploy/.env web
 	# $(COMPOSE) up -d --wait db
 	set -a; . deploy/.env; set +a; \
 	export DATABASE_URL="postgres://sandpost:$$POSTGRES_PASSWORD@127.0.0.1:$${POSTGRES_PORT:-5432}/sandpost?sslmode=disable"; \
+	export COOKIE_SECURE="$${COOKIE_SECURE:-false}"; \
 	go run ./cmd/sandpost migrate up && go run ./cmd/sandpost serve
 
 # Run the server against an external Postgres (no Docker). Requires DATABASE_URL;
@@ -57,6 +65,7 @@ dev: deploy/.env web
 dev-nodb: deploy/.env web
 	set -a; . deploy/.env; set +a; \
 	test -n "$$DATABASE_URL" || { echo "DATABASE_URL is required (environment or deploy/.env), e.g. postgres://user:pass@host:5432/db?sslmode=disable"; exit 1; }; \
+	export COOKIE_SECURE="$${COOKIE_SECURE:-false}"; \
 	go run ./cmd/sandpost migrate up && go run ./cmd/sandpost serve
 
 seed:

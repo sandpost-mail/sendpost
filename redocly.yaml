@@ -1,0 +1,6 @@
+# Lint configuration for docs/openapi.yaml (see the openapi job in .github/workflows/ci.yml).
+extends:
+  - recommended
+rules:
+  # GET /info is public and has no client error to document.
+  operation-4xx-response: off

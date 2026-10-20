@@ -38,7 +38,7 @@ func TestRunDispatch(t *testing.T) {
 		{"help", []string{"help"}, nil, exitOK, "Usage:", ""},
 		{"unknown", []string{"bogus"}, nil, exitUsage, "", `unknown command "bogus"`},
 		{"admin help", []string{"admin"}, nil, exitOK, "Usage: sandpost admin", ""},
-		{"admin task not implemented", []string{"admin", "x"}, nil, exitError, "", "not implemented"},
+		{"admin unknown task", []string{"admin", "x"}, nil, exitError, "", "unknown admin task"},
 		{"serve without config", []string{"serve"}, nil, exitError, "", "DATABASE_URL is required"},
 		{"migrate without config", []string{"migrate"}, nil, exitError, "", "DATABASE_URL is required"},
 		{"migrate bad direction", []string{"migrate", "sideways"}, nil, exitError, "", "unknown migrate direction"},
@@ -77,7 +77,7 @@ func TestMigrateAndServe(t *testing.T) {
 
 	for _, step := range []struct{ arg, want string }{
 		{"status", "pending"},
-		{"up", "applied 3 migration(s)"},
+		{"up", "applied 4 migration(s)"},
 		{"status", "applied"},
 		{"down", "rolled back"},
 		{"up", "applied 1 migration(s)"},

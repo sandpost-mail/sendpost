@@ -9,10 +9,16 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/sandpost-mail/sandpost/internal/audit"
+	"github.com/sandpost-mail/sandpost/internal/auth"
+	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/events"
+	"github.com/sandpost-mail/sandpost/internal/groups"
 	"github.com/sandpost-mail/sandpost/internal/messages"
 	"github.com/sandpost-mail/sandpost/internal/projects"
+	"github.com/sandpost-mail/sandpost/internal/tokens"
+	"github.com/sandpost-mail/sandpost/internal/users"
 )
 
 const (
@@ -22,7 +28,7 @@ const (
 	contentTypeJSON = "application/json"
 )
 
-// ServerInfo is public, non secret server information the UI needs.
+// ServerInfo is non secret server information the UI needs (served to authenticated callers).
 type ServerInfo struct {
 	SMTPPort    int    `json:"smtp_port"`
 	SMTPTLSMode string `json:"smtp_tls_mode"`
@@ -30,14 +36,25 @@ type ServerInfo struct {
 }
 
 // Deps are the collaborators of the handlers. Only DB is needed for the health
-// endpoints, the native API is served when Projects is set.
+// endpoints, the native API is served when Authz is set.
 type Deps struct {
 	DB          Pinger
+	Authz       *authz.Authorizer
+	Auth        *auth.Service
+	Tokens      *tokens.Service
+	Users       *users.Service
+	Groups      *groups.Service
+	Audit       *audit.Reader
+	Signer      *authz.Signer
 	Projects    *projects.Service
 	Credentials *credentials.Service
 	Messages    *messages.Repository
 	Bus         *events.Bus
 	Info        ServerInfo
+	// CookieSecure marks the session cookie Secure (and uses the __Host-
+	// prefix). Set it whenever the UI is served over HTTPS, including behind
+	// a TLS terminating proxy.
+	CookieSecure bool
 	// UI serves the embedded single page app for every non API path.
 	UI  http.Handler
 	Log *slog.Logger
@@ -45,77 +62,33 @@ type Deps struct {
 
 type server struct {
 	Deps
+	logins *loginLimits
+	// loginSlots bounds concurrent password checks: each argon2 verify takes
+	// 64 MiB, and the failure limit is only exact when checks do not overlap.
+	loginSlots chan struct{}
 }
 
 // NewHandler returns the HTTP handler: health endpoints, the native API under
 // /_/api/v1 and the UI for everything else.
 //
-// Until M2 lands there is no authentication on the native API. Run Sandpost on
-// a trusted network. Mutating requests must be JSON, which keeps simple
-// cross site form posts from reaching the handlers.
+// Every native API route except login and the signed preview URLs
+// requires authentication, see routes.go. Mutating requests must be JSON,
+// which keeps simple cross site form posts from reaching the handlers, and
+// cookie authenticated ones also need the CSRF header.
 func NewHandler(d Deps) http.Handler {
 	if d.Log == nil {
 		d.Log = slog.New(slog.DiscardHandler)
 	}
 	mux := http.NewServeMux()
 	registerHealth(mux, d.DB)
-	if d.Projects != nil {
-		s := &server{Deps: d}
+	if d.Authz != nil {
+		s := &server{Deps: d, logins: newLoginLimits(), loginSlots: make(chan struct{}, maxConcurrentLogins)}
 		s.registerV1(mux)
 	}
 	if d.UI != nil {
 		mux.Handle("/", d.UI)
 	}
 	return mux
-}
-
-func (s *server) registerV1(mux *http.ServeMux) {
-	const p = V1Prefix + "/projects/{pid}"
-	route := func(pattern string, h http.HandlerFunc) {
-		mux.Handle(pattern, requireJSONWrites(h))
-	}
-	mux.HandleFunc(V1Prefix+"/", func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotFound, "not found")
-	})
-	route("GET "+V1Prefix+"/info", s.info)
-	route("GET "+V1Prefix+"/projects", s.listProjects)
-	route("POST "+V1Prefix+"/projects", s.createProject)
-	route("GET "+p, s.withProject(s.getProject))
-
-	route("GET "+p+"/credentials", s.withProject(s.listCredentials))
-	route("POST "+p+"/credentials", s.withProject(s.createCredential))
-	route("DELETE "+p+"/credentials/{cid}", s.withProject(s.revokeCredential))
-
-	route("GET "+p+"/tag-rules", s.withProject(s.listTagRules))
-	route("POST "+p+"/tag-rules", s.withProject(s.createTagRule))
-	route("DELETE "+p+"/tag-rules/{rid}", s.withProject(s.deleteTagRule))
-
-	route("GET "+p+"/messages", s.withProject(s.listMessages))
-	route("GET "+p+"/messages/{mid}", s.withProject(s.getMessage))
-	route("POST "+p+"/messages/{mid}/read", s.withProject(s.markRead))
-	route("GET "+p+"/messages/{mid}/raw", s.withProject(s.rawMessage))
-	route("GET "+p+"/messages/{mid}/html", s.withProject(s.htmlMessage))
-	route("GET "+p+"/messages/{mid}/attachments/{ordinal}", s.withProject(s.attachment))
-	route("GET "+p+"/events", s.withProject(s.streamEvents))
-}
-
-// projectHandler receives the validated project id.
-type projectHandler func(w http.ResponseWriter, r *http.Request, projectID int64)
-
-// withProject parses {pid} and checks the project exists, so project scoped
-// endpoints answer 404 for unknown projects instead of empty data.
-func (s *server) withProject(h projectHandler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		pid, ok := pathID(w, r, "pid")
-		if !ok {
-			return
-		}
-		if _, err := s.Projects.Get(r.Context(), pid); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		h(w, r, pid)
-	}
 }
 
 func pathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
@@ -163,20 +136,14 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// fail maps domain errors to responses. Unknown errors are logged and answered
-// with a generic 500 so internals never reach the client.
-func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
-	switch {
-	case errors.Is(err, projects.ErrNotFound), errors.Is(err, messages.ErrNotFound),
-		errors.Is(err, credentials.ErrNotFound), errors.Is(err, credentials.ErrProjectNotFound):
-		writeError(w, http.StatusNotFound, "not found")
-	case errors.Is(err, projects.ErrSlugTaken):
-		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, projects.ErrInvalid), errors.Is(err, credentials.ErrLabelTooLong),
-		errors.Is(err, messages.ErrInvalidCursor):
-		writeError(w, http.StatusBadRequest, err.Error())
-	default:
-		s.Log.Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-	}
+// writeErrorCode adds a stable machine readable code the UI can branch on.
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }
+
+// Stable error codes.
+const (
+	codePasswordChange = "password_change_required"
+	codeCSRF           = "csrf_invalid"
+	codeUnauthorized   = "unauthenticated"
+)

@@ -21,21 +21,24 @@ const usage = `Usage: sandpost <command> [arguments]
 Commands:
   serve            run the HTTP and SMTP servers
   migrate [dir]    apply database migrations (up, down, status; default up)
-  admin            administrative tasks
+  admin            account recovery and user tasks (run "sandpost admin help")
   help             show this help
 `
 
 // env bundles the process dependencies so commands can be tested.
 type env struct {
 	getenv func(string) string
+	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
+	// prompt reads a secret from the terminal without echo.
+	prompt func(label string) (string, error)
 }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	e := env{getenv: os.Getenv, stdout: os.Stdout, stderr: os.Stderr}
+	e := env{getenv: os.Getenv, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, prompt: terminalPrompt}
 	os.Exit(run(ctx, e, os.Args[1:]))
 }
 
@@ -51,7 +54,7 @@ func run(ctx context.Context, e env, args []string) int {
 	case "migrate":
 		err = runMigrate(ctx, e, args[1:])
 	case "admin":
-		err = runAdmin(e, args[1:])
+		err = runAdmin(ctx, e, args[1:])
 	case "help", "-h", "--help":
 		_, _ = fmt.Fprint(e.stdout, usage)
 		return exitOK

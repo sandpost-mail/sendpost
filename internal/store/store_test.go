@@ -62,8 +62,11 @@ func TestMigrateAndQueries(t *testing.T) {
 	if err := store.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	if _, err := pool.Exec(ctx, "SELECT 1 FROM users"); err == nil {
-		t.Fatal("users table should be gone after rolling back the latest migration")
+	if _, err := pool.Exec(ctx, "SELECT 1 FROM groups"); err == nil {
+		t.Fatal("groups table should be gone after rolling back the latest migration")
+	}
+	if _, err := pool.Exec(ctx, "SELECT 1 FROM users"); err != nil {
+		t.Fatalf("older migrations must stay applied: %v", err)
 	}
 	if got, err := q.GetSetting(ctx, "k"); err != nil || got != "two" {
 		t.Fatalf("older migrations must stay applied: %q %v", got, err)

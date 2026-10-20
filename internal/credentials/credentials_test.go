@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
@@ -19,7 +20,7 @@ func TestCreateVerifyRevoke(t *testing.T) {
 	other := testutil.Project(t, pool, "beta")
 	svc := credentials.New(pool, key)
 
-	issued, err := svc.Create(ctx, pid, "  ci pipeline ")
+	issued, err := svc.Create(ctx, authz.Trusted(pid), "  ci pipeline ")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,21 +55,21 @@ func TestCreateVerifyRevoke(t *testing.T) {
 		t.Errorf("other key accepted: %v", err)
 	}
 
-	list, err := svc.List(ctx, pid)
+	list, err := svc.List(ctx, authz.Trusted(pid))
 	if err != nil || len(list) != 1 || list[0].LastUsedAt == nil {
 		t.Fatalf("list: %+v %v", list, err)
 	}
-	if l, _ := svc.List(ctx, other); len(l) != 0 {
+	if l, _ := svc.List(ctx, authz.Trusted(other)); len(l) != 0 {
 		t.Errorf("credentials leaked across projects: %+v", l)
 	}
 
-	if err := svc.Revoke(ctx, other, issued.ID); !errors.Is(err, credentials.ErrNotFound) {
+	if err := svc.Revoke(ctx, authz.Trusted(other), issued.ID); !errors.Is(err, credentials.ErrNotFound) {
 		t.Errorf("revoke from another project: %v", err)
 	}
-	if err := svc.Revoke(ctx, pid, issued.ID); err != nil {
+	if err := svc.Revoke(ctx, authz.Trusted(pid), issued.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Revoke(ctx, pid, issued.ID); !errors.Is(err, credentials.ErrNotFound) {
+	if err := svc.Revoke(ctx, authz.Trusted(pid), issued.ID); !errors.Is(err, credentials.ErrNotFound) {
 		t.Errorf("second revoke: %v", err)
 	}
 	if _, err := svc.Verify(ctx, issued.Username, issued.Secret); !errors.Is(err, credentials.ErrInvalid) {
@@ -82,8 +83,8 @@ func TestSecretsAreNotStoredAndUnique(t *testing.T) {
 	pid := testutil.Project(t, pool, "alpha")
 	svc := credentials.New(pool, key)
 
-	a, _ := svc.Create(ctx, pid, "")
-	b, _ := svc.Create(ctx, pid, "")
+	a, _ := svc.Create(ctx, authz.Trusted(pid), "")
+	b, _ := svc.Create(ctx, authz.Trusted(pid), "")
 	if a.Secret == b.Secret || a.Username == b.Username {
 		t.Fatal("credentials must be unique")
 	}
@@ -100,11 +101,11 @@ func TestCreateErrors(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.Pool(t)
 	svc := credentials.New(pool, key)
-	if _, err := svc.Create(ctx, 999, "x"); !errors.Is(err, credentials.ErrProjectNotFound) {
+	if _, err := svc.Create(ctx, authz.Trusted(999), "x"); !errors.Is(err, credentials.ErrProjectNotFound) {
 		t.Errorf("unknown project: %v", err)
 	}
 	pid := testutil.Project(t, pool, "alpha")
-	if _, err := svc.Create(ctx, pid, strings.Repeat("a", 101)); !errors.Is(err, credentials.ErrLabelTooLong) {
+	if _, err := svc.Create(ctx, authz.Trusted(pid), strings.Repeat("a", 101)); !errors.Is(err, credentials.ErrLabelTooLong) {
 		t.Errorf("long label: %v", err)
 	}
 }
@@ -117,13 +118,13 @@ func TestDatabaseErrorsAreNotInvalid(t *testing.T) {
 	if _, err := svc.Verify(ctx, "sp_x", "y"); err == nil || errors.Is(err, credentials.ErrInvalid) {
 		t.Errorf("a database failure must not look like a bad password: %v", err)
 	}
-	if _, err := svc.List(ctx, 1); err == nil {
+	if _, err := svc.List(ctx, authz.Trusted(1)); err == nil {
 		t.Error("list should fail")
 	}
-	if err := svc.Revoke(ctx, 1, 1); err == nil {
+	if err := svc.Revoke(ctx, authz.Trusted(1), 1); err == nil {
 		t.Error("revoke should fail")
 	}
-	if _, err := svc.Create(ctx, 1, ""); err == nil || errors.Is(err, credentials.ErrProjectNotFound) {
+	if _, err := svc.Create(ctx, authz.Trusted(1), ""); err == nil || errors.Is(err, credentials.ErrProjectNotFound) {
 		t.Errorf("create: %v", err)
 	}
 }

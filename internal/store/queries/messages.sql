@@ -57,9 +57,12 @@ FROM messages WHERE project_id = $1 AND id = $2;
 -- name: GetMessageRaw :one
 SELECT raw FROM messages WHERE project_id = $1 AND id = $2;
 
--- name: MarkMessageRead :exec
+-- name: MarkMessageRead :execrows
 UPDATE messages SET read_at = now()
 WHERE project_id = $1 AND id = $2 AND read_at IS NULL;
+
+-- name: MessageExists :one
+SELECT EXISTS (SELECT 1 FROM messages WHERE project_id = $1 AND id = $2);
 
 -- name: ListMessageRecipients :many
 SELECT kind, address FROM message_recipients

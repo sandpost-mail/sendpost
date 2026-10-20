@@ -380,7 +380,7 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]L
 	return items, nil
 }
 
-const markMessageRead = `-- name: MarkMessageRead :exec
+const markMessageRead = `-- name: MarkMessageRead :execrows
 UPDATE messages SET read_at = now()
 WHERE project_id = $1 AND id = $2 AND read_at IS NULL
 `
@@ -390,7 +390,26 @@ type MarkMessageReadParams struct {
 	ID        int64
 }
 
-func (q *Queries) MarkMessageRead(ctx context.Context, arg MarkMessageReadParams) error {
-	_, err := q.db.Exec(ctx, markMessageRead, arg.ProjectID, arg.ID)
-	return err
+func (q *Queries) MarkMessageRead(ctx context.Context, arg MarkMessageReadParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markMessageRead, arg.ProjectID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const messageExists = `-- name: MessageExists :one
+SELECT EXISTS (SELECT 1 FROM messages WHERE project_id = $1 AND id = $2)
+`
+
+type MessageExistsParams struct {
+	ProjectID int64
+	ID        int64
+}
+
+func (q *Queries) MessageExists(ctx context.Context, arg MessageExistsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, messageExists, arg.ProjectID, arg.ID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }

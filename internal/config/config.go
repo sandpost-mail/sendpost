@@ -49,8 +49,13 @@ type Config struct {
 	AdminEmail      string
 	AdminPassword   string
 	MaxMessageBytes int64
-	LogLevel        slog.Level
-	LogFormat       string
+	// CookieSecure marks the UI session cookie Secure. It defaults to true
+	// (browsers also accept Secure cookies on http://localhost). Set
+	// COOKIE_SECURE=false only when users reach the UI over plain http on a
+	// name other than localhost, for example a LAN address.
+	CookieSecure bool
+	LogLevel     slog.Level
+	LogFormat    string
 }
 
 // LogValue implements slog.LogValuer and never exposes secrets.
@@ -62,6 +67,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("SMTPTLSMode", c.SMTPTLSMode),
 		slog.Bool("AdminBootstrap", c.AdminEmail != ""),
 		slog.Int64("MaxMessageBytes", c.MaxMessageBytes),
+		slog.Bool("CookieSecure", c.CookieSecure),
 		slog.String("LogLevel", c.LogLevel.String()),
 		slog.String("LogFormat", c.LogFormat),
 	)
@@ -104,6 +110,7 @@ func build(get func(string) string) (Config, error) {
 		AdminEmail:      get("ADMIN_EMAIL"),
 		AdminPassword:   get("ADMIN_PASSWORD"),
 		MaxMessageBytes: DefaultMaxMessageBytes,
+		CookieSecure:    true,
 		LogLevel:        slog.LevelInfo,
 		LogFormat:       orDefault(strings.ToLower(get("LOG_FORMAT")), logFormatText),
 	}
@@ -153,6 +160,13 @@ func build(get func(string) string) (Config, error) {
 		default:
 			c.MaxMessageBytes = n
 		}
+	}
+	if raw := get("COOKIE_SECURE"); raw != "" {
+		secure, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, errors.New("COOKIE_SECURE must be true or false"))
+		}
+		c.CookieSecure = secure
 	}
 	if raw := get("LOG_LEVEL"); raw != "" {
 		if err := c.LogLevel.UnmarshalText([]byte(raw)); err != nil {

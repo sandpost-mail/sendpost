@@ -1,0 +1,1250 @@
+openapi: 3.0.3
+info:
+  title: Sandpost native API
+  version: 0.2.0
+  description: |
+    The native API of Sandpost, served under `/_/api/v1`. It is what the web UI uses.
+
+    Authentication: a browser session (cookie `sandpost_session`, or `__Host-sandpost_session` when
+    `COOKIE_SECURE` is on) or a bearer API token (`spu_...` user tokens, `spp_...` project tokens).
+    Writes with a session cookie must also send the `X-CSRF-Token` header (returned by login and
+    `GET /auth/me`). Bearer requests never need it. Every write must use `Content-Type: application/json`.
+
+    Status policy: 401 when not authenticated, 403 when authenticated but the role lacks the capability
+    (or a password change is pending, code `password_change_required`), 404 for anything that does not
+    exist or that the caller can not see. A project the caller has no role on answers exactly like a
+    project that does not exist.
+
+    Roles on a project (the highest among the user's groups): viewer, member, owner. Instance
+    administrators act as owner everywhere and manage users, groups and projects. Token scopes cap
+    the role: `read` is viewer, `write` is member, `manage` leaves the owner's own power untouched.
+    Project tokens only accept `read` and `write` and are pinned to their project.
+  license:
+    name: MIT
+    url: https://opensource.org/license/mit
+servers:
+  - url: /_/api/v1
+tags:
+  - name: server
+    description: Public connection hints.
+  - name: auth
+    description: Login, logout, the current user and the own password.
+  - name: users
+    description: User accounts (instance administrators).
+  - name: groups
+    description: Groups and their members (instance administrators).
+  - name: projects
+    description: Projects, role assignment of groups and tag rules.
+  - name: credentials
+    description: SMTP credentials of a project.
+  - name: tokens
+    description: API tokens of users and projects.
+  - name: messages
+    description: Captured messages, previews and the live event stream.
+  - name: audit
+    description: Audit log of administrative actions.
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+paths:
+  /info:
+    get:
+      tags: [server]
+      operationId: getInfo
+      summary: Connection hints for the UI (SMTP port, TLS mode, version)
+      responses:
+        "200":
+          description: Server information
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Start a browser session
+      description: Sets the session cookie. Failed logins are rate limited per address and per account (429).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              additionalProperties: false
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Logged in. `user.must_change_password` tells the client to show the password form.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429":
+          description: Too many failed attempts, see `Retry-After`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: End the session
+      x-allows-password-change-pending: true
+      responses:
+        "204": { description: Logged out }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: The authenticated user and, for sessions, the CSRF token
+      x-allows-password-change-pending: true
+      responses:
+        "200":
+          description: The caller
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /auth/password:
+    post:
+      tags: [auth]
+      operationId: changePassword
+      summary: Change the own password (browser session only)
+      description: Ends the user's other sessions and clears the forced change flag.
+      x-allows-password-change-pending: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              additionalProperties: false
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 12, maxLength: 128 }
+      responses:
+        "204": { description: Password changed }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /users/me/tokens:
+    get:
+      tags: [tokens]
+      operationId: listMyTokens
+      summary: List the own API tokens
+      responses:
+        "200":
+          description: Tokens, newest first, never including secrets
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [tokens]
+      operationId: createMyToken
+      summary: Create a user API token
+      description: The secret is only returned here. A token can not request scopes beyond its own.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenInput" }
+      responses:
+        "201":
+          description: The token with its secret
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedToken" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /users/me/tokens/{tid}:
+    delete:
+      tags: [tokens]
+      operationId: revokeMyToken
+      summary: Revoke an own API token
+      parameters: [{ $ref: "#/components/parameters/tid" }]
+      responses:
+        "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users:
+    get:
+      tags: [users]
+      operationId: listUsers
+      summary: List users
+      x-required-capability: users.manage
+      responses:
+        "200":
+          description: Users ordered by email
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [users]
+      operationId: createUser
+      summary: Create a user (must change the password at first login)
+      x-required-capability: users.manage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              additionalProperties: false
+              properties:
+                email: { type: string, format: email }
+                name: { type: string, maxLength: 200 }
+                password: { type: string, minLength: 12, maxLength: 128 }
+                is_admin: { type: boolean }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /users/{uid}:
+    parameters: [{ $ref: "#/components/parameters/uid" }]
+    get:
+      tags: [users]
+      operationId: getUser
+      summary: Get a user
+      x-required-capability: users.manage
+      responses:
+        "200":
+          description: The user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [users]
+      operationId: updateUser
+      summary: Rename, promote or demote, disable or re-enable a user
+      description: Disabling ends the user's sessions and stops its tokens. The last active administrator can not be demoted or disabled (409).
+      x-required-capability: users.manage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, maxLength: 200 }
+                is_admin: { type: boolean }
+                disabled: { type: boolean }
+      responses:
+        "200":
+          description: The updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /users/{uid}/password:
+    post:
+      tags: [users]
+      operationId: resetPassword
+      summary: Set a new password for a user (forces a change at next login, ends its sessions)
+      x-required-capability: users.manage
+      parameters: [{ $ref: "#/components/parameters/uid" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_password]
+              additionalProperties: false
+              properties:
+                new_password: { type: string, minLength: 12, maxLength: 128 }
+      responses:
+        "204": { description: Password reset }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users/{uid}/tokens:
+    get:
+      tags: [tokens]
+      operationId: listUserTokens
+      summary: List the API tokens of a user
+      x-required-capability: users.manage
+      parameters: [{ $ref: "#/components/parameters/uid" }]
+      responses:
+        "200":
+          description: Tokens, newest first, never including secrets
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /users/{uid}/tokens/{tid}:
+    delete:
+      tags: [tokens]
+      operationId: revokeUserToken
+      summary: Revoke an API token of a user
+      x-required-capability: users.manage
+      parameters:
+        - { $ref: "#/components/parameters/uid" }
+        - { $ref: "#/components/parameters/tid" }
+      responses:
+        "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups:
+    get:
+      tags: [groups]
+      operationId: listGroups
+      summary: List groups with their member count
+      x-required-capability: groups.manage
+      responses:
+        "200":
+          description: Groups ordered by name
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [groups]
+      operationId: createGroup
+      summary: Create a group
+      x-required-capability: groups.manage
+      requestBody: { $ref: "#/components/requestBodies/GroupName" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /groups/{gid}:
+    parameters: [{ $ref: "#/components/parameters/gid" }]
+    get:
+      tags: [groups]
+      operationId: getGroup
+      summary: Get a group
+      x-required-capability: groups.manage
+      responses:
+        "200":
+          description: The group
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [groups]
+      operationId: renameGroup
+      summary: Rename a group
+      x-required-capability: groups.manage
+      requestBody: { $ref: "#/components/requestBodies/GroupName" }
+      responses:
+        "200":
+          description: The renamed group
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [groups]
+      operationId: deleteGroup
+      summary: Delete a group with its memberships and project role assignments
+      x-required-capability: groups.manage
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups/{gid}/members:
+    get:
+      tags: [groups]
+      operationId: listGroupMembers
+      summary: List the members of a group
+      x-required-capability: groups.manage
+      parameters: [{ $ref: "#/components/parameters/gid" }]
+      responses:
+        "200":
+          description: Users ordered by email
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups/{gid}/members/{uid}:
+    parameters:
+      - { $ref: "#/components/parameters/gid" }
+      - { $ref: "#/components/parameters/uid" }
+    put:
+      tags: [groups]
+      operationId: addGroupMember
+      summary: Add a user to a group (idempotent)
+      x-required-capability: groups.manage
+      responses:
+        "204": { description: Member added }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [groups]
+      operationId: removeGroupMember
+      summary: Remove a user from a group
+      x-required-capability: groups.manage
+      responses:
+        "204": { description: Member removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /audit:
+    get:
+      tags: [audit]
+      operationId: listAudit
+      summary: Instance wide audit log, newest first
+      x-required-capability: audit.read
+      parameters:
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: Projects visible to the caller
+      description: Everything for administrators, the projects of the user's groups otherwise, the single pinned project for a project token.
+      responses:
+        "200":
+          description: Projects ordered by name
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProjectList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [projects]
+      operationId: createProject
+      summary: Create a project
+      x-required-capability: projects.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                slug: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,62}$", description: Derived from the name when empty }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /projects/{pid}:
+    get:
+      tags: [projects]
+      operationId: getProject
+      summary: Get a project
+      x-required-capability: messages.read
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: The project
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/groups:
+    get:
+      tags: [projects]
+      operationId: listProjectGroups
+      summary: Groups assigned to the project with their role
+      x-required-capability: project.groups
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: Assignments ordered by group name
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssignmentList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/groups/{gid}:
+    parameters:
+      - { $ref: "#/components/parameters/pid" }
+      - { $ref: "#/components/parameters/gid" }
+    put:
+      tags: [projects]
+      operationId: assignProjectGroup
+      summary: Give a group a role on the project (replaces its previous role)
+      x-required-capability: project.groups
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              additionalProperties: false
+              properties:
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "204": { description: Role assigned }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [projects]
+      operationId: removeProjectGroup
+      summary: Withdraw the role of a group on the project
+      x-required-capability: project.groups
+      responses:
+        "204": { description: Role removed }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/audit:
+    get:
+      tags: [audit]
+      operationId: listProjectAudit
+      summary: Audit log of one project, newest first
+      x-required-capability: project.groups
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/credentials:
+    get:
+      tags: [credentials]
+      operationId: listCredentials
+      summary: SMTP credentials of the project (never with secrets)
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: Credentials, newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CredentialList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [credentials]
+      operationId: createCredential
+      summary: Create an SMTP credential, the secret is shown once
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                label: { type: string, maxLength: 100 }
+      responses:
+        "201":
+          description: The credential with its secret
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedCredential" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/credentials/{cid}:
+    delete:
+      tags: [credentials]
+      operationId: revokeCredential
+      summary: Revoke an SMTP credential
+      x-required-capability: project.manage
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/cid" }
+      responses:
+        "204": { description: Revoked }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/tokens:
+    get:
+      tags: [tokens]
+      operationId: listProjectTokens
+      summary: API tokens pinned to the project
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: Tokens, newest first, never including secrets
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [tokens]
+      operationId: createProjectToken
+      summary: Create a project API token (scopes read and write only), the secret is shown once
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenInput" }
+      responses:
+        "201":
+          description: The token with its secret
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedToken" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/tokens/{tid}:
+    delete:
+      tags: [tokens]
+      operationId: revokeProjectToken
+      summary: Revoke a project API token
+      x-required-capability: project.manage
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/tid" }
+      responses:
+        "204": { description: Revoked }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/tag-rules:
+    get:
+      tags: [projects]
+      operationId: listTagRules
+      summary: Tag rules applied at ingest
+      x-required-capability: messages.read
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: Rules in creation order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TagRuleList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [projects]
+      operationId: createTagRule
+      summary: Create a tag rule
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TagRuleInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TagRule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/tag-rules/{rid}:
+    delete:
+      tags: [projects]
+      operationId: deleteTagRule
+      summary: Delete a tag rule
+      x-required-capability: project.manage
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/rid" }
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages:
+    get:
+      tags: [messages]
+      operationId: listMessages
+      summary: Search and page through captured messages, newest first
+      description: "`q` supports from:, to:, subject:, tag:, body:, date:YYYY-MM-DD, after:, before: and free words."
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { name: q, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { name: limit, in: query, description: "Page size (default 50, maximum 200)", schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessagePage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}:
+    get:
+      tags: [messages]
+      operationId: getMessage
+      summary: A message with recipients, attachments, links and tags
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+      responses:
+        "200":
+          description: The message
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/read:
+    post:
+      tags: [messages]
+      operationId: markMessageRead
+      summary: Mark a message as read (no-op when already read)
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+      responses:
+        "204": { description: Marked }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/raw:
+    get:
+      tags: [messages]
+      operationId: getMessageRaw
+      summary: The original message source, or an .eml download with `download=1`
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+        - { name: download, in: query, schema: { type: string, enum: ["1"] } }
+      responses:
+        "200":
+          description: RFC 822 source
+          content:
+            text/plain: { schema: { type: string } }
+            message/rfc822: { schema: { type: string, format: binary } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/preview-url:
+    get:
+      tags: [messages]
+      operationId: getMessagePreviewURL
+      summary: Mint a short lived signed URL for the sandboxed HTML preview
+      description: |
+        The preview iframe has an opaque origin and carries no cookie, so the URL carries a signed
+        grant (`grant=<expiry>.<signature>`, valid a few minutes). The signature binds the project,
+        message and resource. Inline images in the returned HTML use signed attachment URLs.
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+      responses:
+        "200":
+          description: The signed URL (a path on this server) and its expiry
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url, expires_at]
+                properties:
+                  url: { type: string }
+                  expires_at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/html:
+    get:
+      tags: [messages]
+      operationId: getMessageHTML
+      summary: The HTML body for the sandboxed iframe
+      description: Authenticated like any read, or with a signed `grant` and no credentials. Served with a sandbox CSP (no scripts, remote content blocked).
+      x-required-capability: messages.read
+      x-signed-grant: true
+      security: [{ cookieAuth: [] }, { bearerAuth: [] }, {}]
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+        - { $ref: "#/components/parameters/grant" }
+      responses:
+        "200":
+          description: HTML document
+          content:
+            text/html: { schema: { type: string } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/attachments/{ordinal}:
+    get:
+      tags: [messages]
+      operationId: getMessageAttachment
+      summary: Attachment bytes (download), or an inline image with a signed `grant`
+      x-required-capability: messages.read
+      x-signed-grant: true
+      security: [{ cookieAuth: [] }, { bearerAuth: [] }, {}]
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+        - { name: ordinal, in: path, required: true, schema: { type: integer, minimum: 0 } }
+        - { $ref: "#/components/parameters/grant" }
+      responses:
+        "200":
+          description: Attachment content
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/events:
+    get:
+      tags: [messages]
+      operationId: streamProjectEvents
+      summary: Server sent events for new messages
+      description: Events `ready`, `message.created`, `resync`. The stream of a browser session ends when the session expires.
+      x-required-capability: messages.read
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream: { schema: { type: string } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: sandpost_session
+      description: Browser session. Unsafe methods also need the `X-CSRF-Token` header.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API token (`spu_...` or `spp_...`)
+  parameters:
+    pid: { name: pid, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+    mid: { name: mid, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+    cid: { name: cid, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+    rid: { name: rid, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+    tid: { name: tid, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+    uid: { name: uid, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+    gid: { name: gid, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+    cursor: { name: cursor, in: query, description: The next_cursor of the previous page, schema: { type: string } }
+    limit: { name: limit, in: query, description: "Page size (default 50, maximum 200)", schema: { type: integer, minimum: 0 } }
+    grant: { name: grant, in: query, description: "Signed preview grant (<expiry>.<signature>)", schema: { type: string } }
+  requestBodies:
+    GroupName:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [name]
+            additionalProperties: false
+            properties:
+              name: { type: string, minLength: 1, maxLength: 100 }
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Not authenticated (code `unauthenticated`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The role lacks the capability, a password change is pending (code `password_change_required`) or the CSRF token is missing (code `csrf_invalid`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Does not exist, or is not visible to the caller
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Name or email already in use, or the last administrator would be lost
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        code: { type: string, description: "Stable machine readable code: unauthenticated, csrf_invalid, password_change_required, invalid_credentials, too_many_attempts" }
+    Role:
+      type: string
+      enum: [viewer, member, owner]
+    ServerInfo:
+      type: object
+      required: [smtp_port, smtp_tls_mode, version]
+      properties:
+        smtp_port: { type: integer }
+        smtp_tls_mode: { type: string }
+        version: { type: string }
+    User:
+      type: object
+      required: [id, email, name, is_admin, must_change_password, created_at, disabled_at]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string }
+        name: { type: string }
+        is_admin: { type: boolean }
+        must_change_password: { type: boolean }
+        created_at: { type: string, format: date-time }
+        disabled_at: { type: string, format: date-time, nullable: true }
+    UserList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/User" } }
+    SessionResponse:
+      type: object
+      required: [user, csrf_token, expires_at]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        csrf_token: { type: string, description: Send as X-CSRF-Token on every unsafe request }
+        expires_at: { type: string, format: date-time }
+    MeResponse:
+      type: object
+      required: [user, auth_kind]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        auth_kind: { type: string, enum: [session, user_token] }
+        csrf_token: { type: string, description: Only for sessions }
+        expires_at: { type: string, format: date-time, description: Only for sessions }
+    Group:
+      type: object
+      required: [id, name, created_at, member_count]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        member_count: { type: integer, description: Filled by the list endpoint only }
+    GroupList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Group" } }
+    Assignment:
+      type: object
+      required: [group_id, group_name, role]
+      properties:
+        group_id: { type: integer, format: int64 }
+        group_name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+    AssignmentList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Assignment" } }
+    Project:
+      type: object
+      required: [id, slug, name, created_at, role]
+      properties:
+        id: { type: integer, format: int64 }
+        slug: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        role:
+          allOf: [{ $ref: "#/components/schemas/Role" }]
+          description: >-
+            The caller's effective role on the project. Instance administrators are owners.
+            A token caller gets the role capped by its scopes (read is viewer, write is member).
+    ProjectList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Project" } }
+    Credential:
+      type: object
+      required: [id, project_id, username, label, created_at, revoked_at, last_used_at]
+      properties:
+        id: { type: integer, format: int64 }
+        project_id: { type: integer, format: int64 }
+        username: { type: string }
+        label: { type: string }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        last_used_at: { type: string, format: date-time, nullable: true }
+    IssuedCredential:
+      allOf:
+        - { $ref: "#/components/schemas/Credential" }
+        - type: object
+          required: [secret]
+          properties:
+            secret: { type: string, description: "Shown once, not recoverable" }
+    CredentialList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Credential" } }
+    TokenInput:
+      type: object
+      required: [scopes]
+      additionalProperties: false
+      properties:
+        label: { type: string, maxLength: 100 }
+        scopes:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [read, write, manage] }
+    Token:
+      type: object
+      required: [id, owner_user_id, project_id, prefix, label, scopes, created_at, revoked_at, last_used_at]
+      properties:
+        id: { type: integer, format: int64 }
+        owner_user_id: { type: integer, format: int64, nullable: true }
+        project_id: { type: integer, format: int64, nullable: true }
+        prefix: { type: string, description: "The first characters of the secret, safe to display" }
+        label: { type: string }
+        scopes: { type: array, items: { type: string, enum: [read, write, manage] } }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        last_used_at: { type: string, format: date-time, nullable: true }
+    IssuedToken:
+      allOf:
+        - { $ref: "#/components/schemas/Token" }
+        - type: object
+          required: [secret]
+          properties:
+            secret: { type: string, description: "Shown once. Prefix spu_ (user) or spp_ (project) lets secret scanners recognize it." }
+    TokenList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Token" } }
+    TagRuleInput:
+      type: object
+      required: [kind, tag]
+      additionalProperties: false
+      properties:
+        kind: { type: string, enum: [header, recipient] }
+        header_name: { type: string, maxLength: 200 }
+        pattern: { type: string, maxLength: 200 }
+        tag: { type: string, minLength: 1, maxLength: 100 }
+    TagRule:
+      type: object
+      required: [id, project_id, kind, header_name, pattern, tag, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        project_id: { type: integer, format: int64 }
+        kind: { type: string, enum: [header, recipient] }
+        header_name: { type: string }
+        pattern: { type: string }
+        tag: { type: string }
+        created_at: { type: string, format: date-time }
+    TagRuleList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/TagRule" } }
+    MessageSummary:
+      type: object
+      required: [id, received_at, from, to, subject, size_bytes, read_at, tags, attachment_count]
+      properties:
+        id: { type: integer, format: int64 }
+        received_at: { type: string, format: date-time }
+        from: { type: string }
+        to: { type: array, items: { type: string } }
+        subject: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        read_at: { type: string, format: date-time, nullable: true }
+        tags: { type: array, items: { type: string } }
+        attachment_count: { type: integer }
+    MessagePage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/MessageSummary" } }
+        next_cursor: { type: string, description: Empty on the last page }
+    Recipient:
+      type: object
+      required: [kind, address]
+      properties:
+        kind: { type: string, enum: [to, cc, bcc, envelope] }
+        address: { type: string }
+    Attachment:
+      type: object
+      required: [ordinal, filename, content_type, size_bytes, content_id, inline]
+      properties:
+        ordinal: { type: integer }
+        filename: { type: string }
+        content_type: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        content_id: { type: string }
+        inline: { type: boolean }
+    MessageDetail:
+      type: object
+      required: [id, received_at, message_id, from, subject, size_bytes, text, has_html, headers, recipients, attachments, links, tags, read_at]
+      properties:
+        id: { type: integer, format: int64 }
+        received_at: { type: string, format: date-time }
+        message_id: { type: string }
+        from: { type: string }
+        subject: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        text: { type: string }
+        has_html: { type: boolean }
+        headers: { type: object, additionalProperties: { type: array, items: { type: string } } }
+        recipients: { type: array, items: { $ref: "#/components/schemas/Recipient" } }
+        attachments: { type: array, items: { $ref: "#/components/schemas/Attachment" } }
+        links: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string } }
+        read_at: { type: string, format: date-time, nullable: true }
+    AuditEvent:
+      type: object
+      required: [id, at, actor_user_id, actor_email, project_id, action, target, detail]
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        actor_user_id: { type: integer, format: int64, nullable: true }
+        actor_email: { type: string }
+        project_id: { type: integer, format: int64, nullable: true }
+        action: { type: string, example: credential.create }
+        target: { type: string, example: "credential:12" }
+        detail: { type: object, description: "Free form, never contains secrets" }
+    AuditPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }
+        next_cursor: { type: string, description: Empty on the last page }

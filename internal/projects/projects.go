@@ -12,6 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sandpost-mail/sandpost/internal/audit"
+	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
@@ -61,15 +63,18 @@ type TagRuleInput struct {
 	Tag        string `json:"tag"`
 }
 
-// Service reads and writes projects.
+// Service reads and writes projects. Methods that touch one project take an
+// authz.Scope, so the capability check has already happened.
 type Service struct {
-	q *sqlcgen.Queries
+	db store.DB
+	q  *sqlcgen.Queries
 }
 
 // New returns a Service on db.
-func New(db sqlcgen.DBTX) *Service { return &Service{q: sqlcgen.New(db)} }
+func New(db store.DB) *Service { return &Service{db: db, q: sqlcgen.New(db)} }
 
-// Create adds a project. An empty slug is derived from the name.
+// Create adds a project. An empty slug is derived from the name. The caller
+// must hold the global projects.create capability.
 func (s *Service) Create(ctx context.Context, name, slug string) (Project, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len([]rune(name)) > maxNameRunes {
@@ -82,7 +87,17 @@ func (s *Service) Create(ctx context.Context, name, slug string) (Project, error
 	if !slugPattern.MatchString(slug) {
 		return Project{}, fmt.Errorf("%w: slug must match %s", ErrInvalid, slugPattern)
 	}
-	row, err := s.q.CreateProject(ctx, sqlcgen.CreateProjectParams{Slug: slug, Name: name})
+	var row sqlcgen.Project
+	err := store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
+		var err error
+		if row, err = q.CreateProject(ctx, sqlcgen.CreateProjectParams{Slug: slug, Name: name}); err != nil {
+			return err
+		}
+		return audit.Record(ctx, q, audit.Entry{
+			Action: "project.create", ProjectID: row.ID, Target: fmt.Sprintf("project:%d", row.ID),
+			Detail: map[string]any{"slug": slug, "name": name},
+		})
+	})
 	if store.IsUniqueViolation(err) {
 		return Project{}, ErrSlugTaken
 	}
@@ -92,9 +107,9 @@ func (s *Service) Create(ctx context.Context, name, slug string) (Project, error
 	return Project(row), nil
 }
 
-// Get returns one project.
-func (s *Service) Get(ctx context.Context, id int64) (Project, error) {
-	row, err := s.q.GetProject(ctx, id)
+// Get returns the scope's project.
+func (s *Service) Get(ctx context.Context, scope authz.Scope) (Project, error) {
+	row, err := s.q.GetProject(ctx, scope.ProjectID())
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Project{}, ErrNotFound
 	}
@@ -104,7 +119,33 @@ func (s *Service) Get(ctx context.Context, id int64) (Project, error) {
 	return Project(row), nil
 }
 
-// List returns all projects ordered by name.
+// Visible is a project a user holds a role on through their groups.
+type Visible struct {
+	Project Project
+	// Rank is the highest group role rank on the project (3 owner, 2 member,
+	// 1 viewer), the input of authz.UserRole.
+	Rank int32
+}
+
+// ListVisible returns the projects a user holds a role on, ordered by name,
+// each with the user's highest group role rank, in one query. Instance
+// administrators use List instead.
+func (s *Service) ListVisible(ctx context.Context, userID int64) ([]Visible, error) {
+	rows, err := s.q.ListVisibleProjectsWithRank(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list visible projects: %w", err)
+	}
+	out := make([]Visible, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Visible{
+			Project: Project{ID: r.ID, Slug: r.Slug, Name: r.Name, CreatedAt: r.CreatedAt},
+			Rank:    r.Rank,
+		})
+	}
+	return out, nil
+}
+
+// List returns all projects ordered by name. Only for instance administrators.
 func (s *Service) List(ctx context.Context) ([]Project, error) {
 	rows, err := s.q.ListProjects(ctx)
 	if err != nil {
@@ -144,8 +185,8 @@ func Slugify(name string) string {
 }
 
 // ListTagRules returns the project's rules in creation order.
-func (s *Service) ListTagRules(ctx context.Context, projectID int64) ([]TagRule, error) {
-	rows, err := s.q.ListTagRules(ctx, projectID)
+func (s *Service) ListTagRules(ctx context.Context, scope authz.Scope) ([]TagRule, error) {
+	rows, err := s.q.ListTagRules(ctx, scope.ProjectID())
 	if err != nil {
 		return nil, fmt.Errorf("list tag rules: %w", err)
 	}
@@ -157,13 +198,24 @@ func (s *Service) ListTagRules(ctx context.Context, projectID int64) ([]TagRule,
 }
 
 // CreateTagRule validates and stores a rule.
-func (s *Service) CreateTagRule(ctx context.Context, projectID int64, in TagRuleInput) (TagRule, error) {
+func (s *Service) CreateTagRule(ctx context.Context, scope authz.Scope, in TagRuleInput) (TagRule, error) {
 	in.HeaderName, in.Pattern, in.Tag = strings.TrimSpace(in.HeaderName), strings.TrimSpace(in.Pattern), strings.TrimSpace(in.Tag)
 	if err := validateRule(in); err != nil {
 		return TagRule{}, err
 	}
-	row, err := s.q.CreateTagRule(ctx, sqlcgen.CreateTagRuleParams{
-		ProjectID: projectID, Kind: in.Kind, HeaderName: in.HeaderName, Pattern: in.Pattern, Tag: in.Tag,
+	var row sqlcgen.TagRule
+	err := store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
+		var err error
+		row, err = q.CreateTagRule(ctx, sqlcgen.CreateTagRuleParams{
+			ProjectID: scope.ProjectID(), Kind: in.Kind, HeaderName: in.HeaderName, Pattern: in.Pattern, Tag: in.Tag,
+		})
+		if err != nil {
+			return err
+		}
+		return audit.Record(ctx, q, audit.Entry{
+			Action: "tag_rule.create", ProjectID: scope.ProjectID(), Target: fmt.Sprintf("tag_rule:%d", row.ID),
+			Detail: map[string]any{"kind": in.Kind, "tag": in.Tag},
+		})
 	})
 	if store.IsForeignKeyViolation(err) {
 		return TagRule{}, ErrNotFound
@@ -197,13 +249,24 @@ func validateRule(in TagRuleInput) error {
 }
 
 // DeleteTagRule removes a rule of the project.
-func (s *Service) DeleteTagRule(ctx context.Context, projectID, ruleID int64) error {
-	n, err := s.q.DeleteTagRule(ctx, sqlcgen.DeleteTagRuleParams{ProjectID: projectID, ID: ruleID})
+func (s *Service) DeleteTagRule(ctx context.Context, scope authz.Scope, ruleID int64) error {
+	err := store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
+		n, err := q.DeleteTagRule(ctx, sqlcgen.DeleteTagRuleParams{ProjectID: scope.ProjectID(), ID: ruleID})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return audit.Record(ctx, q, audit.Entry{
+			Action: "tag_rule.delete", ProjectID: scope.ProjectID(), Target: fmt.Sprintf("tag_rule:%d", ruleID),
+		})
+	})
+	if errors.Is(err, ErrNotFound) {
+		return err
+	}
 	if err != nil {
 		return fmt.Errorf("delete tag rule: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
 	}
 	return nil
 }

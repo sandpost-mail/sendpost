@@ -6,7 +6,23 @@ package sqlcgen
 
 import (
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type ApiToken struct {
+	ID          int64
+	OwnerUserID pgtype.Int8
+	ProjectID   pgtype.Int8
+	TokenHmac   []byte
+	Prefix      string
+	Label       string
+	Scopes      []string
+	CreatedBy   pgtype.Int8
+	CreatedAt   time.Time
+	RevokedAt   *time.Time
+	LastUsedAt  *time.Time
+}
 
 type Attachment struct {
 	ID          int64
@@ -17,6 +33,28 @@ type Attachment struct {
 	SizeBytes   int64
 	ContentID   string
 	Inline      bool
+}
+
+type AuditLog struct {
+	ID          int64
+	At          time.Time
+	ActorUserID pgtype.Int8
+	ProjectID   pgtype.Int8
+	Action      string
+	Target      string
+	Detail      []byte
+}
+
+type Group struct {
+	ID        int64
+	Name      string
+	CreatedAt time.Time
+}
+
+type GroupMember struct {
+	GroupID int64
+	UserID  int64
+	AddedAt time.Time
 }
 
 type InstanceSetting struct {
@@ -63,6 +101,19 @@ type Project struct {
 	Slug      string
 	Name      string
 	CreatedAt time.Time
+}
+
+type ProjectGroup struct {
+	ProjectID int64
+	GroupID   int64
+	Role      string
+}
+
+type Session struct {
+	ID        []byte
+	UserID    int64
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 type SmtpCredential struct {
