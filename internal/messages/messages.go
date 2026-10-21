@@ -18,6 +18,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/search"
+	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
 
@@ -88,11 +89,12 @@ type Detail struct {
 
 // Repository reads messages.
 type Repository struct {
-	q *sqlcgen.Queries
+	q  *sqlcgen.Queries
+	db store.DB
 }
 
 // New returns a Repository on db.
-func New(db sqlcgen.DBTX) *Repository { return &Repository{q: sqlcgen.New(db)} }
+func New(db store.DB) *Repository { return &Repository{q: sqlcgen.New(db), db: db} }
 
 // List returns one page of the project's messages, newest first, filtered by
 // query. cursor is the NextCursor of the previous page, or empty.

@@ -85,3 +85,45 @@ func TestProjectScope(t *testing.T) {
 		t.Errorf("foreign project: %v, want not found", err)
 	}
 }
+
+func TestProjectBySlug(t *testing.T) {
+	pool := testutil.Pool(t)
+	a := authz.New(pool)
+	ctx := context.Background()
+	p1 := testutil.Project(t, pool, "alpha")
+	testutil.Project(t, pool, "beta")
+	g := testutil.Group(t, pool, "g")
+	testutil.Assign(t, pool, p1, g, "viewer")
+	uid := testutil.User(t, pool, "v@example.test", false)
+	testutil.Member(t, pool, g, uid)
+	user := authz.Principal{Kind: authz.KindUserToken, UserID: uid, Ceiling: authz.RoleAdmin}
+	proj := authz.Principal{Kind: authz.KindProjectToken, ProjectID: p1, Ceiling: authz.RoleMember}
+
+	tests := []struct {
+		name string
+		p    authz.Principal
+		slug string
+		cap  authz.Capability
+		want int64
+		err  error
+	}{
+		{"user with a role", user, "alpha", authz.CapReadMessages, p1, nil},
+		{"project token on its own slug", proj, "alpha", authz.CapWriteMessages, p1, nil},
+		{"role too low", user, "alpha", authz.CapWriteMessages, 0, authz.ErrForbidden},
+		{"foreign slug looks like a missing one", user, "beta", authz.CapReadMessages, 0, authz.ErrNotFound},
+		{"project token on another slug", proj, "beta", authz.CapReadMessages, 0, authz.ErrNotFound},
+		{"unknown slug", user, "nope", authz.CapReadMessages, 0, authz.ErrNotFound},
+		{"empty slug", user, "", authz.CapReadMessages, 0, authz.ErrNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scope, err := a.ProjectBySlug(ctx, tc.p, tc.slug, tc.cap)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("err = %v, want %v", err, tc.err)
+			}
+			if tc.err == nil && scope.ProjectID() != tc.want {
+				t.Errorf("project = %d, want %d", scope.ProjectID(), tc.want)
+			}
+		})
+	}
+}

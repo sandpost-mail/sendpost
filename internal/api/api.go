@@ -84,6 +84,7 @@ func NewHandler(d Deps) http.Handler {
 	if d.Authz != nil {
 		s := &server{Deps: d, logins: newLoginLimits(), loginSlots: make(chan struct{}, maxConcurrentLogins)}
 		s.registerV1(mux)
+		s.registerCompat(mux)
 	}
 	if d.UI != nil {
 		mux.Handle("/", d.UI)

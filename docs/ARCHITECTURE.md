@@ -149,6 +149,33 @@ Decisions taken here (revisit if needed)
 - Session lifetime is a fixed 24 hours, there is no sliding window or "remember me".
 - Account recovery is `sandpost admin` (`list-users`, `create-admin`, `reset-password`, `unlock`, `promote`, see README). It connects with `DATABASE_URL` through the same config loader and uses `users.Service`, so validation, the last administrator guard, session revocation and audit rows are the ones of the API. Passwords come from a no echo prompt or `--password-stdin`, never argv. CLI changes carry no actor user: `audit.WithSource(ctx, "cli")` records `"actor": "cli"` in the audit detail. `unlock` clears `disabled_at` only: login throttling lives in process memory, nothing is persisted, so restarting the server clears it.
 
+### M3 implementation notes
+
+Contract and routes
+- Target Mailpit v1.31.6. Its swagger (OpenAPI 2.0) is vendored unmodified in `docs/mailpit/`, tests read it from disk. `docs/MAILPIT_COMPATIBILITY.md` is the endpoint matrix, `docs/MAILPIT_MIGRATION.md` the guide.
+- The compat handlers live in `internal/api` (`compat_*.go`) rather than in a separate `mpcompat` package: they share the server, its dependencies and the test harness. They have their own route table (`compatRoutes`, exported as `CompatRoutes()`), separate from the native one, so `docs/openapi.yaml` and its test only cover `/_/api/v1`. `compat_contract_test.go` ties the table to the vendored swagger (every operation present, none extra) and to the matrix document.
+- Routes are registered twice, `/api/v1/...` and `/p/{slug}/api/v1/...`, plus `/view/{name}` and `/p/{slug}/view/{name}` (Go patterns can not express `{ID}.html`, the handler splits the suffix). `/api/v1/` and `/p/{slug}/api/v1/` have a catch-all answering Mailpit's plain `404 page not found`, so unknown paths never fall through to the SPA. Endpoints Sandpost does not offer are in the table as `unsupported` and answer 501 after authentication.
+
+Authentication and authorization
+- `compatGuard` is separate from the native `guard`: only `Authorization` is read (Bearer, or Basic with the token as password), never the session cookie, so no CSRF handling is needed and `requireJSONWrites` is not applied (Mailpit clients send DELETE without a body or content type). Tokens are verified by `tokens.Service`, a user whose `must_change_password` is set gets 403.
+- Project resolution: a project token names its project (`Authorizer.Project` on its own id). A user token must use `/p/{slug}`, resolved by the new `Authorizer.ProjectBySlug`, which returns `ErrNotFound` for an unknown slug exactly like for a project without a role. All three cases produce the same 404 body and headers (tested).
+- Capabilities: `messages.read` for reads and for marking read (also `GET /message/{ID}` and the views, which mark read as Mailpit does), `messages.write` for delete and tag changes.
+- All data access goes through `messages.Repository` methods that take an `authz.Scope`, and every new SQL statement restricts `project_id` itself. Ids in request bodies are intersected with the project in SQL (`project_id = $1 AND id = ANY($2)`), so a foreign id is silently ignored, the answer equals the one for an unknown id. `messages.New` now takes a `store.DB` (it needs transactions for tags).
+
+Search
+- The Mailpit syntax is parsed by `search.ParseMailpit` into a `search.Filter`: parallel slices (kind, value, negate) with LIKE patterns already escaped. It is separate from the native `search.Parse` because it needs negation, repeated keys and more operators.
+- Migration `00005_compat_search.sql` adds the SQL function `sp_filter_match(id, from, subject, message_id, text, read_at, received_at, size, headers, kinds, vals, negs)` (columns, not the row, so raw and html_body are never detoasted; queries skip the call when the filter is empty; at most 20 terms): a message matches when every term holds (a term holds when its match differs from its negate flag, an unknown kind never holds, so mistakes fail closed). The list, count, delete and set-read queries (`store/queries/compat.sql`) share it, so a search used for deletion selects exactly what the same search lists. The function reads only the row it gets, queries always add `project_id`.
+- Destructive operations by search (`DELETE /search`, `PUT /messages` with `Search`) refuse a filter with no usable term (400) and an invalid date is a 400 instead of Mailpit's silently dropped term, so a typo can not widen a delete. `DELETE /messages` with an empty body or list deletes everything of the project (as Mailpit), a malformed body is a 400.
+- Free text is a substring match (ILIKE) over subject, text body, sender and recipient addresses, as Mailpit does. It does not use the tsvector index, so on very large mailboxes it is a scan inside the project. Pagination is offset based (`start`/`limit`, `limit=0` meaning "all" is capped at 1000), as the contract defines.
+
+Shapes
+- `compat_shapes.go` maps stored data to Mailpit JSON: ids as decimal strings, `PartID` is the attachment ordinal, display names come from the stored headers (`To`, `Cc`, `Reply-To`), `Bcc` is the envelope recipients missing from To and Cc, `Snippet` is derived from the body at read time (the first 1000 characters of text, or 4000 of HTML when there is no text), attachment checksums are computed from the raw message when a message is fetched. `Username` is empty (the SMTP credential is not stored on messages).
+- Tags: a project's tag list is derived from `message_tags`, unused tag rows are pruned after deletions and tag changes (`FOR UPDATE SKIP LOCKED`, so a concurrent ingest that has just upserted a tag is never raced). Tag names follow Mailpit's rule (letters, digits, space and `- _ . @`, at most 100), invalid names are dropped. Migration `00006` makes tag names unique without regard to case (`lower(name)`, merging existing variants), `UpsertTags` conflicts on it and inserts names in sorted order so concurrent writers can not deadlock.
+
+Not done
+- Thumbnails (image decoding of untrusted input, no resize dependency), send, release (M4), chaos, HTML/link/SpamAssassin checks. Deleting through this API does not publish an event on the SSE stream yet.
+- Running real Mailpit client libraries and Mailpit's own examples against Sandpost (backlog 3.4) needs network access and their toolchains, it is open.
+
 ## 3. Data model (Postgres)
 
 ```
@@ -211,7 +238,7 @@ internal/ingest/       parsing, persistence, tag rules
 internal/policy/       policy evaluation, delivery jobs
 internal/authz/        roles, scoped repositories
 internal/api/          native handlers
-internal/mpcompat/     Mailpit-compatible handlers
+internal/api/compat_*  Mailpit-compatible handlers (in the api package, not a separate mpcompat, see M3 notes)
 internal/events/       LISTEN/NOTIFY fan-out, SSE
 internal/store/        sqlc queries, migrations
 web/                   SvelteKit app
