@@ -10,3 +10,6 @@ GROUP BY p.id;
 
 -- name: ProjectExists :one
 SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1);
+
+-- name: ProjectIDBySlug :one
+SELECT id FROM projects WHERE slug = $1;

@@ -89,6 +89,17 @@ func TestParseAttachmentsAndInline(t *testing.T) {
 	}
 }
 
+func TestAttachmentBytes(t *testing.T) {
+	raw := fixture(t, "attachments_inline.eml")
+	got := AttachmentBytes(raw)
+	if len(got) != 2 || string(got[0]) != "%PDF-1.4 fake pdf bytes" || len(got[1]) == 0 {
+		t.Errorf("bytes: %q", got)
+	}
+	if got := AttachmentBytes(fixture(t, "simple_text.eml")); len(got) != 0 {
+		t.Errorf("a message without attachments: %q", got)
+	}
+}
+
 func TestParseCharsets(t *testing.T) {
 	p := Parse(fixture(t, "charset_latin1.eml"), "", nil)
 	if p.Subject != "Café résumé crème" {

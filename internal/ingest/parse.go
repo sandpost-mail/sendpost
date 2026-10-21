@@ -230,3 +230,19 @@ func AttachmentContent(raw []byte, ordinal int) (a Attachment, content []byte, o
 	metas := collectAttachments(env)
 	return metas[ordinal], parts[ordinal].Content, true
 }
+
+// AttachmentBytes re-parses raw and returns the decoded bytes of every
+// attachment, indexed by Attachment.Ordinal. It returns nil when raw cannot be
+// parsed.
+func AttachmentBytes(raw []byte) [][]byte {
+	env := parseEnvelope(raw)
+	if env == nil {
+		return nil
+	}
+	parts := attachmentParts(env)
+	out := make([][]byte, len(parts))
+	for i, p := range parts {
+		out[i] = p.Content
+	}
+	return out
+}

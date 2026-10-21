@@ -118,6 +118,20 @@ func (a *Authorizer) Project(ctx context.Context, p Principal, projectID int64, 
 	return Scope{projectID: projectID, role: role}, nil
 }
 
+// ProjectBySlug is Project for a project named by its slug. An unknown slug
+// and a project the principal has no role on are both ErrNotFound, so slugs
+// can not be probed.
+func (a *Authorizer) ProjectBySlug(ctx context.Context, p Principal, slug string, c Capability) (Scope, error) {
+	id, err := a.q.ProjectIDBySlug(ctx, slug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Scope{}, ErrNotFound
+	}
+	if err != nil {
+		return Scope{}, fmt.Errorf("project by slug: %w", err)
+	}
+	return a.Project(ctx, p, id, c)
+}
+
 // Global checks a global capability. Project tokens never hold one, and a
 // user token needs the manage scope.
 func Global(p Principal, c Capability) error {

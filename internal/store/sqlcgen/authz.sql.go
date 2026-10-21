@@ -20,6 +20,17 @@ func (q *Queries) ProjectExists(ctx context.Context, id int64) (bool, error) {
 	return exists, err
 }
 
+const projectIDBySlug = `-- name: ProjectIDBySlug :one
+SELECT id FROM projects WHERE slug = $1
+`
+
+func (q *Queries) ProjectIDBySlug(ctx context.Context, slug string) (int64, error) {
+	row := q.db.QueryRow(ctx, projectIDBySlug, slug)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const projectRoleRank = `-- name: ProjectRoleRank :one
 SELECT COALESCE(max(CASE pg.role WHEN 'owner' THEN 3 WHEN 'member' THEN 2 WHEN 'viewer' THEN 1 ELSE 0 END), 0)::int AS rank
 FROM projects p
