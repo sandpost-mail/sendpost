@@ -62,8 +62,11 @@ func TestMigrateAndQueries(t *testing.T) {
 	if err := store.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	if _, err := pool.Exec(ctx, "SELECT 1 FROM groups"); err == nil {
-		t.Fatal("groups table should be gone after rolling back the latest migration")
+	if _, err := pool.Exec(ctx, "SELECT sp_filter_match(m, '{}', '{}', '{}') FROM messages m"); err == nil {
+		t.Fatal("sp_filter_match should be gone after rolling back the latest migration")
+	}
+	if _, err := pool.Exec(ctx, "SELECT 1 FROM groups"); err != nil {
+		t.Fatalf("the access control migration must stay applied: %v", err)
 	}
 	if _, err := pool.Exec(ctx, "SELECT 1 FROM users"); err != nil {
 		t.Fatalf("older migrations must stay applied: %v", err)
