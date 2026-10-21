@@ -2,7 +2,7 @@
 
 Self-hosted email capture and safe delivery for development, staging and CI. One Go binary, a Svelte UI, Postgres. See [docs/PRD.md](docs/PRD.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/BACKLOG.md](docs/BACKLOG.md).
 
-Status: early development. M1 (capture core) is done: apps send mail through authenticated SMTP and it is stored and streamed live. M2 (access control) is done: login, sessions, users, groups, project roles, API tokens and an audit log, with the whole native API behind them, and the web UI for login, administration, tokens and audit (see "Access control" below).
+Status: early development. M1 (capture core) is done: apps send mail through authenticated SMTP and it is stored and streamed live. M2 (access control) is done: login, sessions, users, groups, project roles, API tokens and an audit log, with the whole native API behind them, and the web UI for login, administration, tokens and audit (see "Access control" below). M3 (Mailpit-compatible API) is implemented: tests written for Mailpit work against `/api/v1` with a project token (see "Mailpit-compatible API" below). Running real Mailpit client libraries against it is still to do.
 
 ## Quick start
 
@@ -71,6 +71,16 @@ Plain http note: with the default `COOKIE_SECURE=true` the session cookie is onl
 curl -c jar -H 'Content-Type: application/json' -d '{"email":"admin@example.com","password":"..."}' localhost:8080/_/api/v1/auth/login
 curl -b jar -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"Shop"}' localhost:8080/_/api/v1/projects
 ```
+
+## Mailpit-compatible API
+
+An existing per-project Mailpit setup moves to Sandpost by changing the base URL and the credential. The API of Mailpit v1.31.6 is served, project-scoped, at `/api/v1` (project token) and `/p/{project-slug}/api/v1` (project token, or a user token with a role on the project): list, search, get message, raw, headers, attachments, `/view/{id}.html|.txt`, delete, mark read and tags. Send the token as `Authorization: Bearer <token>`, or as the password of HTTP Basic auth with any username.
+
+```
+curl -u x:$SANDPOST_TOKEN 'localhost:8080/api/v1/search?query=to:user@example.test&limit=5'
+```
+
+Reads need the `read` scope, delete and tag changes need `write`. Message ids are decimal strings. Not supported (answers 501): send, release, chaos, HTML/link/spam checks, thumbnails. See [docs/MAILPIT_COMPATIBILITY.md](docs/MAILPIT_COMPATIBILITY.md) for the endpoint matrix, the search syntax and the deviations, and [docs/MAILPIT_MIGRATION.md](docs/MAILPIT_MIGRATION.md) for the migration steps. The vendored contract is in [docs/mailpit](docs/mailpit).
 
 ## Commands
 
