@@ -95,6 +95,11 @@ func TestParseMailpitErrors(t *testing.T) {
 		{"invalid after", "after:yesterday-ish", search.ErrInvalidDate},
 		{"invalid before", "before:2026-13-45", search.ErrInvalidDate},
 		{"too long", strings.Repeat("a ", search.MaxQueryLength), search.ErrQueryTooLong},
+		{"too many terms", strings.Repeat("a ", search.MaxTerms+1), search.ErrTooManyTerms},
+		{"larger overflows bigint", "larger:99999999999999999999", search.ErrSizeTooLarge},
+		{"smaller overflows after kb", "smaller:9007199254740992kb", search.ErrSizeTooLarge},
+		{"smaller overflows after mb", "-smaller:8796093022208mb", search.ErrSizeTooLarge},
+		{"huge digits", "larger:" + strings.Repeat("9", 400), search.ErrSizeTooLarge},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,5 +117,19 @@ func TestFilterLenMatchesParallelArrays(t *testing.T) {
 	}
 	if f.Len() != 3 || len(f.Vals) != 3 || len(f.Negs) != 3 {
 		t.Errorf("arrays out of step: %+v", f)
+	}
+}
+
+func TestTermCapAndSizeLimits(t *testing.T) {
+	if _, err := search.ParseMailpit(strings.Repeat("a ", search.MaxTerms), time.UTC); err != nil {
+		t.Errorf("exactly the cap must pass: %v", err)
+	}
+	// A value that fits after the unit multiplication is accepted.
+	f, err := search.ParseMailpit("larger:8388607mb", time.UTC)
+	if err != nil || f.Vals[0] != "8796091973632" {
+		t.Errorf("%v %v", f, err)
+	}
+	if _, err := search.ParseMailpit("larger:9223372036854775807", time.UTC); err != nil && !errors.Is(err, search.ErrSizeTooLarge) {
+		t.Errorf("max int64 must either parse or be rejected cleanly: %v", err)
 	}
 }

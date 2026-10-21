@@ -47,9 +47,9 @@ Status: `implemented` (same behaviour apart from the notes), `partial` (works wi
 | GET | `/api/v1/message/{ID}/sa-check` | unsupported | SpamAssassin is not integrated. |
 | POST | `/api/v1/message/{ID}/release` | unsupported | Planned with the delivery policy (manual release to an allowlisted address). |
 | GET | `/api/v1/tags` | implemented | Tags in use in the project, sorted. |
-| PUT | `/api/v1/tags` | implemented | Replaces the tags of the given messages. Invalid names are dropped, case duplicates collapse, as in Mailpit. |
-| PUT | `/api/v1/tags/{Tag}` | implemented | Rename. 400 when the tag does not exist, the new name is invalid or already used. |
-| DELETE | `/api/v1/tags/{Tag}` | implemented | Removes the tag from its messages. 400 when it does not exist. |
+| PUT | `/api/v1/tags` | implemented | Replaces the tags of the given messages. Invalid names are dropped, case duplicates collapse (the first spelling wins), as in Mailpit. Tag names are case insensitive. |
+| PUT | `/api/v1/tags/{Tag}` | implemented | Rename, also a change of case only. The tag is found without regard to case. 404 when the tag does not exist (even when the new name is the same), 400 when the new name is invalid or used by another tag. Mailpit answers 400 for a missing tag. |
+| DELETE | `/api/v1/tags/{Tag}` | implemented | Removes the tag from its messages. 404 when it does not exist (Mailpit: 400). |
 | GET | `/view/{ID}.html` | partial | Served at `/view/...` and `/p/{slug}/view/...`, outside `/api/v1`. `embed=1` is ignored. Inline images point at the part endpoint of this API, which needs the token, so a browser only shows them when it sends credentials. Carries a sandbox CSP. Marks the message read. |
 | GET | `/view/{ID}.txt` | implemented | Marks the message read. |
 
@@ -70,18 +70,18 @@ Differences in the values:
 
 ## Search syntax
 
-Terms are separated by spaces, double quotes group a phrase, `-` or `!` in front negates a term, every term must match. Matching is case insensitive substring unless noted. Dates without a zone are read in UTC, or in the zone of the `tz` parameter.
+A search can have at most 20 terms, more answers 400. Terms are separated by spaces, double quotes group a phrase, `-` or `!` in front negates a term, every term must match. Matching is case insensitive substring unless noted. Dates without a zone are read in UTC, or in the zone of the `tz` parameter.
 
 | Term | Supported | Notes |
 |---|---|---|
 | `from:` `to:` `cc:` `bcc:` `reply-to:` `addressed:` | yes | Matched against the address (and, for `from:`, the display name). `to:` and `cc:` use the header addresses, `bcc:` the envelope recipients missing from To and Cc, `addressed:` any of From, To, Cc, Bcc and Reply-To. Display names of recipients are not searched. |
 | `subject:` | yes | |
 | `message-id:` | yes | |
-| `tag:` | yes | Exact tag name, case sensitive. |
+| `tag:` | yes | Exact tag name, case insensitive. |
 | `is:read` `is:unread` `is:tagged` | yes | |
 | `has:attachment(s)` `has:inline(s)` | yes | |
 | `after:` `before:` | yes | Both inclusive, as in Mailpit. Formats: `2026-10-14`, `2026-10-14 13:30`, `2026-10-14 13:30:05`, RFC 3339. Mailpit accepts many more formats, and ignores an invalid date. Sandpost answers 400 for an invalid date, because dropping the term would widen a delete. |
-| `larger:` `smaller:` | yes | Sizes such as `500`, `2kb`, `1.5m`, `10mb`. |
+| `larger:` `smaller:` | yes | Sizes such as `500`, `2kb`, `1.5m`, `10mb`. A size that does not fit in a signed 64 bit byte count (after the kb or mb multiplication) answers 400. |
 | plain words | partial | Substring of the subject, the text body (generated from the HTML for HTML only mail), the sender and the recipient addresses. Mailpit's search text is From, Subject, To, Cc, Bcc, Reply-To and Return-Path, the HTML body stripped of markup (or the text body when there is no HTML) and the attachment file names. So in Sandpost attachment names, Reply-To and Return-Path are not searched by plain words (use `reply-to:`). |
 | anything else with a colon | as text | Treated as a plain word, like Mailpit. |
 

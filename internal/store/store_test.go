@@ -62,8 +62,11 @@ func TestMigrateAndQueries(t *testing.T) {
 	if err := store.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	if _, err := pool.Exec(ctx, "SELECT sp_filter_match(m, '{}', '{}', '{}') FROM messages m"); err == nil {
-		t.Fatal("sp_filter_match should be gone after rolling back the latest migration")
+	if _, err := pool.Exec(ctx, "DROP INDEX tags_project_lower_name_idx"); err == nil {
+		t.Fatal("the tag index should be gone after rolling back the latest migration")
+	}
+	if _, err := pool.Exec(ctx, "SELECT 1 FROM pg_proc WHERE proname = 'sp_filter_match'"); err != nil {
+		t.Fatalf("older migrations must stay applied: %v", err)
 	}
 	if _, err := pool.Exec(ctx, "SELECT 1 FROM groups"); err != nil {
 		t.Fatalf("the access control migration must stay applied: %v", err)

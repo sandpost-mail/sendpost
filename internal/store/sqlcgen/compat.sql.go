@@ -51,7 +51,7 @@ SELECT count(*)::bigint AS total,
        (count(*) FILTER (WHERE m.read_at IS NULL))::bigint AS unread
 FROM messages m
 WHERE m.project_id = $1
-  AND sp_filter_match(m, $2::text[], $3::text[], $4::boolean[])
+  AND (cardinality($2::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, $2::text[], $3::text[], $4::boolean[]))
 `
 
 type CompatCountMessagesParams struct {
@@ -98,7 +98,7 @@ func (q *Queries) CompatDeleteByIDs(ctx context.Context, arg CompatDeleteByIDsPa
 const compatDeleteMatching = `-- name: CompatDeleteMatching :execrows
 DELETE FROM messages m
 WHERE m.project_id = $1
-  AND sp_filter_match(m, $2::text[], $3::text[], $4::boolean[])
+  AND (cardinality($2::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, $2::text[], $3::text[], $4::boolean[]))
 `
 
 type CompatDeleteMatchingParams struct {
@@ -122,7 +122,7 @@ func (q *Queries) CompatDeleteMatching(ctx context.Context, arg CompatDeleteMatc
 }
 
 const compatDeleteTag = `-- name: CompatDeleteTag :execrows
-DELETE FROM tags WHERE project_id = $1 AND name = $2
+DELETE FROM tags WHERE project_id = $1 AND lower(name) = lower($2)
 `
 
 type CompatDeleteTagParams struct {
@@ -153,7 +153,7 @@ SELECT m.id, m.received_at, m.message_id_hdr, m.from_addr, m.subject, m.size_byt
        (SELECT count(*) FROM attachments a WHERE a.message_id = m.id AND NOT a.inline)::int AS attachment_count
 FROM messages m
 WHERE m.project_id = $1
-  AND sp_filter_match(m, $2::text[], $3::text[], $4::boolean[])
+  AND (cardinality($2::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, $2::text[], $3::text[], $4::boolean[]))
 ORDER BY m.received_at DESC, m.id DESC
 OFFSET $5::int
 LIMIT $6::int
@@ -186,7 +186,7 @@ type CompatListMessagesRow struct {
 
 // Queries of the Mailpit compatible API. A filter is passed as three parallel
 // arrays (kinds, vals, negs), see sp_filter_match in migration 00005. Empty
-// arrays match every message. Every statement restricts project_id itself.
+// arrays match every message and skip the function. Every statement restricts project_id itself.
 func (q *Queries) CompatListMessages(ctx context.Context, arg CompatListMessagesParams) ([]CompatListMessagesRow, error) {
 	rows, err := q.db.Query(ctx, compatListMessages,
 		arg.ProjectID,
@@ -307,7 +307,7 @@ func (q *Queries) CompatPruneTags(ctx context.Context, projectID int64) error {
 }
 
 const compatRenameTag = `-- name: CompatRenameTag :execrows
-UPDATE tags SET name = $1 WHERE project_id = $2 AND name = $3
+UPDATE tags SET name = $1 WHERE project_id = $2 AND lower(name) = lower($3)
 `
 
 type CompatRenameTagParams struct {
@@ -350,7 +350,7 @@ UPDATE messages m
 SET read_at = CASE WHEN $1::boolean THEN now() ELSE NULL END
 WHERE m.project_id = $2
   AND (m.read_at IS NOT NULL) <> $1::boolean
-  AND sp_filter_match(m, $3::text[], $4::text[], $5::boolean[])
+  AND (cardinality($3::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, $3::text[], $4::text[], $5::boolean[]))
 `
 
 type CompatSetReadMatchingParams struct {

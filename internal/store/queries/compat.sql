@@ -1,6 +1,6 @@
 -- Queries of the Mailpit compatible API. A filter is passed as three parallel
 -- arrays (kinds, vals, negs), see sp_filter_match in migration 00005. Empty
--- arrays match every message. Every statement restricts project_id itself.
+-- arrays match every message and skip the function. Every statement restricts project_id itself.
 
 -- name: CompatListMessages :many
 SELECT m.id, m.received_at, m.message_id_hdr, m.from_addr, m.subject, m.size_bytes, m.read_at,
@@ -16,7 +16,7 @@ SELECT m.id, m.received_at, m.message_id_hdr, m.from_addr, m.subject, m.size_byt
        (SELECT count(*) FROM attachments a WHERE a.message_id = m.id AND NOT a.inline)::int AS attachment_count
 FROM messages m
 WHERE m.project_id = @project_id
-  AND sp_filter_match(m, @kinds::text[], @vals::text[], @negs::boolean[])
+  AND (cardinality(@kinds::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, @kinds::text[], @vals::text[], @negs::boolean[]))
 ORDER BY m.received_at DESC, m.id DESC
 OFFSET @row_offset::int
 LIMIT @row_limit::int;
@@ -26,12 +26,12 @@ SELECT count(*)::bigint AS total,
        (count(*) FILTER (WHERE m.read_at IS NULL))::bigint AS unread
 FROM messages m
 WHERE m.project_id = @project_id
-  AND sp_filter_match(m, @kinds::text[], @vals::text[], @negs::boolean[]);
+  AND (cardinality(@kinds::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, @kinds::text[], @vals::text[], @negs::boolean[]));
 
 -- name: CompatDeleteMatching :execrows
 DELETE FROM messages m
 WHERE m.project_id = @project_id
-  AND sp_filter_match(m, @kinds::text[], @vals::text[], @negs::boolean[]);
+  AND (cardinality(@kinds::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, @kinds::text[], @vals::text[], @negs::boolean[]));
 
 -- name: CompatDeleteByIDs :execrows
 DELETE FROM messages WHERE project_id = @project_id AND id = ANY(@ids::bigint[]);
@@ -41,7 +41,7 @@ UPDATE messages m
 SET read_at = CASE WHEN @read::boolean THEN now() ELSE NULL END
 WHERE m.project_id = @project_id
   AND (m.read_at IS NOT NULL) <> @read::boolean
-  AND sp_filter_match(m, @kinds::text[], @vals::text[], @negs::boolean[]);
+  AND (cardinality(@kinds::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, @kinds::text[], @vals::text[], @negs::boolean[]));
 
 -- name: CompatSetReadByIDs :execrows
 UPDATE messages
@@ -83,7 +83,7 @@ GROUP BY t.id, t.name
 ORDER BY t.name;
 
 -- name: CompatRenameTag :execrows
-UPDATE tags SET name = @new_name WHERE project_id = @project_id AND name = @old_name;
+UPDATE tags SET name = @new_name WHERE project_id = @project_id AND lower(name) = lower(@old_name);
 
 -- name: CompatDeleteTag :execrows
-DELETE FROM tags WHERE project_id = @project_id AND name = @name;
+DELETE FROM tags WHERE project_id = @project_id AND lower(name) = lower(@name);

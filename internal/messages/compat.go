@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -258,6 +259,8 @@ func (r *Repository) ReplaceTags(ctx context.Context, scope authz.Scope, ids []i
 		return nil
 	}
 	names = NormalizeTags(names)
+	// Sorted, so concurrent writers take tag locks in the same order.
+	slices.SortFunc(names, func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) })
 	pid := scope.ProjectID()
 	return store.InTx(ctx, r.db, func(q *sqlcgen.Queries) error {
 		own, err := q.CompatProjectMessageIDs(ctx, sqlcgen.CompatProjectMessageIDsParams{ProjectID: pid, Ids: ids})
@@ -299,15 +302,17 @@ func (r *Repository) TagCounts(ctx context.Context, scope authz.Scope) ([]TagCou
 	return out, nil
 }
 
-// RenameTag renames a tag of the project. It returns ErrTagNotFound,
-// ErrTagExists or ErrInvalidTag. Renaming a tag to itself does nothing.
+// RenameTag renames a tag of the project. Tag names are case insensitive,
+// so from is found without regard to case and a case only rename is allowed.
+// It returns ErrTagNotFound (also when from equals to but does not exist),
+// ErrTagExists when another tag already has that name, or ErrInvalidTag.
 func (r *Repository) RenameTag(ctx context.Context, scope authz.Scope, from, to string) error {
-	to = strings.TrimSpace(to)
+	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+	if !validTag.MatchString(from) {
+		return ErrTagNotFound
+	}
 	if !validTag.MatchString(to) {
 		return ErrInvalidTag
-	}
-	if from == to {
-		return nil
 	}
 	pid := scope.ProjectID()
 	return store.InTx(ctx, r.db, func(q *sqlcgen.Queries) error {

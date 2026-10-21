@@ -132,13 +132,14 @@ func compatOK(w http.ResponseWriter) { compatText(w, http.StatusOK, "ok") }
 // unexpected errors are logged and answered with a generic 500.
 func (s *server) compatFail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, authz.ErrNotFound), errors.Is(err, messages.ErrNotFound), errors.Is(err, projects.ErrNotFound):
+	case errors.Is(err, authz.ErrNotFound), errors.Is(err, messages.ErrNotFound), errors.Is(err, projects.ErrNotFound),
+		errors.Is(err, messages.ErrTagNotFound):
 		compatNotFound(w)
 	case errors.Is(err, authz.ErrForbidden):
 		compatText(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, search.ErrInvalidDate), errors.Is(err, search.ErrQueryTooLong),
-		errors.Is(err, messages.ErrEmptyFilter), errors.Is(err, messages.ErrTagNotFound),
-		errors.Is(err, messages.ErrTagExists), errors.Is(err, messages.ErrInvalidTag):
+		errors.Is(err, messages.ErrEmptyFilter), errors.Is(err, search.ErrTooManyTerms),
+		errors.Is(err, search.ErrSizeTooLarge), errors.Is(err, messages.ErrTagExists), errors.Is(err, messages.ErrInvalidTag):
 		compatText(w, http.StatusBadRequest, err.Error())
 	default:
 		s.Log.Error("compat request failed", "method", r.Method, "path", r.URL.Path, "error", err)

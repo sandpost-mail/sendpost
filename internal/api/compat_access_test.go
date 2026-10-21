@@ -247,7 +247,7 @@ func TestCompatCrossTenantLeakage(t *testing.T) {
 			{"PUT", "/api/v1/tags/only-two", `{"Name":"renamed"}`},
 			{"DELETE", "/api/v1/tags/only-two", ""},
 		} {
-			if r := w.a.mp(w.proj1Write, a.method, a.path, a.body); r.StatusCode != http.StatusBadRequest {
+			if r := w.a.mp(w.proj1Write, a.method, a.path, a.body); r.StatusCode != http.StatusNotFound {
 				t.Errorf("%s %s: status %d: %s", a.method, a.path, r.StatusCode, r.body)
 			}
 		}

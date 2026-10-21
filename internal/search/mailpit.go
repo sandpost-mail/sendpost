@@ -1,7 +1,9 @@
 package search
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -35,6 +37,15 @@ func (f Filter) with(kind, val string, neg bool) Filter {
 		Negs:  append(slices.Clone(f.Negs), neg),
 	}
 }
+
+// MaxTerms bounds the number of terms of one Mailpit style search.
+const MaxTerms = 20
+
+// Errors specific to the Mailpit syntax.
+var (
+	ErrTooManyTerms = fmt.Errorf("a search can have at most %d terms", MaxTerms)
+	ErrSizeTooLarge = errors.New("size is too large")
+)
 
 // kindText is the kind of a free text term.
 const kindText = "text"
@@ -85,6 +96,9 @@ func ParseMailpit(s string, loc *time.Location) (Filter, error) {
 		if f, err = addTerm(f, arg, neg, loc); err != nil {
 			return Filter{}, err
 		}
+		if f.Len() > MaxTerms {
+			return Filter{}, ErrTooManyTerms
+		}
 	}
 	return f, nil
 }
@@ -115,7 +129,11 @@ func addTerm(f Filter, arg string, neg bool, loc *time.Location) (Filter, error)
 		return addDate(f, lw[:strings.IndexByte(lw, ':')], strings.TrimSpace(arg[strings.IndexByte(arg, ':')+1:]), neg, loc)
 	case strings.HasPrefix(lw, "larger:"), strings.HasPrefix(lw, "smaller:"):
 		key, val, _ := strings.Cut(arg, ":")
-		if n := sizeToBytes(strings.TrimSpace(val)); n > 0 {
+		n, err := sizeToBytes(strings.TrimSpace(val))
+		if err != nil {
+			return Filter{}, fmt.Errorf("%s:%s: %w", strings.ToLower(key), val, err)
+		}
+		if n > 0 {
 			return f.with(strings.ToLower(key), strconv.FormatUint(n, 10), neg), nil
 		}
 	}
@@ -194,23 +212,31 @@ func splitArgs(s string) []string {
 var sizeRe = regexp.MustCompile(`^(\d+)(\.\d+)?\s?([a-z]{1,2})?$`)
 
 // sizeToBytes reads sizes such as 2kb, 4MB or 1.5m. It returns 0 for text that
-// is not a size.
-func sizeToBytes(v string) uint64 {
+// is not a size, and ErrSizeTooLarge for a size that does not fit a signed
+// 64 bit byte count (the type the database compares with).
+func sizeToBytes(v string) (uint64, error) {
 	m := sizeRe.FindStringSubmatch(strings.ToLower(v))
 	if m == nil {
-		return 0
+		return 0, nil
 	}
 	n, err := strconv.ParseFloat(m[1]+m[2], 64)
+	if errors.Is(err, strconv.ErrRange) {
+		return 0, ErrSizeTooLarge
+	}
 	if err != nil || n < 0 {
-		return 0
+		return 0, nil
 	}
 	switch m[3] {
 	case "":
-		return uint64(n)
 	case "k", "kb":
-		return uint64(n * 1024)
+		n *= 1024
 	case "m", "mb":
-		return uint64(n * 1024 * 1024)
+		n *= 1024 * 1024
+	default:
+		return 0, nil
 	}
-	return 0
+	if n >= math.MaxInt64 { // as a float this is 2^63
+		return 0, ErrSizeTooLarge
+	}
+	return uint64(n), nil
 }

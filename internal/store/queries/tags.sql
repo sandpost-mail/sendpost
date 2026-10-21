@@ -11,9 +11,14 @@ RETURNING id, project_id, kind, header_name, pattern, tag, created_at;
 DELETE FROM tag_rules WHERE project_id = $1 AND id = $2;
 
 -- name: UpsertTags :many
+-- Tag names are unique without regard to case (the first spelling wins).
+-- Names go in sorted order, so concurrent writers lock tag rows in the same
+-- order and can not deadlock.
 INSERT INTO tags (project_id, name)
-SELECT @project_id::bigint, n FROM unnest(@names::text[]) AS n
-ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name
+SELECT @project_id::bigint, n
+FROM (SELECT DISTINCT ON (lower(x)) x AS n FROM unnest(@names::text[]) AS x ORDER BY lower(x), x) AS d
+ORDER BY lower(n)
+ON CONFLICT (project_id, lower(name)) DO UPDATE SET name = tags.name
 RETURNING id;
 
 -- name: AttachTags :exec

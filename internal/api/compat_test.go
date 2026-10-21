@@ -469,15 +469,26 @@ func TestCompatTags(t *testing.T) {
 		t.Errorf("after clearing: %q", got)
 	}
 
-	for name, req := range map[string][3]string{
-		"rename missing":      {"PUT", "/api/v1/tags/missing", `{"Name":"x"}`},
-		"rename to invalid":   {"PUT", "/api/v1/tags/x", `{"Name":"a/b"}`},
-		"delete missing":      {"DELETE", "/api/v1/tags/missing", ""},
-		"set with bad body":   {"PUT", "/api/v1/tags", `nope`},
-		"rename with no body": {"PUT", "/api/v1/tags/x", ``},
+	for name, req := range map[string][4]string{
+		"rename missing":           {"PUT", "/api/v1/tags/missing", `{"Name":"x"}`, "404"},
+		"rename missing to itself": {"PUT", "/api/v1/tags/missing", `{"Name":"missing"}`, "404"},
+		"rename to invalid":        {"PUT", "/api/v1/tags/run-1", `{"Name":"a/b"}`, "400"},
+		"delete missing":           {"DELETE", "/api/v1/tags/missing", "", "404"},
+		"set with bad body":        {"PUT", "/api/v1/tags", `nope`, "400"},
+		"rename with no body":      {"PUT", "/api/v1/tags/x", ``, "400"},
 	} {
-		if r := c.a.mp(c.token, req[0], req[1], req[2]); r.StatusCode != http.StatusBadRequest {
-			t.Errorf("%s: status %d: %s", name, r.StatusCode, r.body)
+		want := 400
+		if req[3] == "404" {
+			want = 404
+		}
+		if r := c.a.mp(c.token, req[0], req[1], req[2]); r.StatusCode != want {
+			t.Errorf("%s: status %d want %d: %s", name, r.StatusCode, want, r.body)
+		}
+	}
+	// Search limits answer 400, never 500.
+	for _, q := range []string{"larger:99999999999999999999", "smaller:9999999999999999kb", strings.Repeat("a ", 21)} {
+		if r := c.a.mp(c.token, "GET", "/api/v1/search?query="+url.QueryEscape(q), ""); r.StatusCode != http.StatusBadRequest {
+			t.Errorf("query %.30q: status %d", q, r.StatusCode)
 		}
 	}
 }

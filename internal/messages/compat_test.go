@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -392,5 +393,130 @@ func TestAttachmentSums(t *testing.T) {
 	}
 	if _, err := e.repo.AttachmentSums(ctx, authz.Trusted(other), id); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("foreign project: %v", err)
+	}
+}
+
+func TestTagsAreCaseInsensitive(t *testing.T) {
+	e := newEnv(t)
+	ids := seedCompat(t, e)
+	scope := authz.Trusted(e.pid)
+	ctx := context.Background()
+	names := func() []string {
+		got, err := e.repo.TagCounts(ctx, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, tc := range got {
+			out = append(out, tc.Name)
+		}
+		return out
+	}
+
+	if err := e.repo.ReplaceTags(ctx, scope, []int64{ids[0]}, []string{"Foo"}); err != nil {
+		t.Fatal(err)
+	}
+	// Another message gets the same tag in a different case: one tag, first spelling.
+	if err := e.repo.ReplaceTags(ctx, scope, []int64{ids[1]}, []string{"foo"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(); !slices.Equal(got, []string{"Foo"}) {
+		t.Errorf("tags: %v", got)
+	}
+	if c, _ := e.repo.CountFiltered(ctx, scope, filter(t, "tag:FOO")); c.Total != 2 {
+		t.Errorf("tag: search is case insensitive, got %d", c.Total)
+	}
+
+	// Case only rename.
+	if err := e.repo.RenameTag(ctx, scope, "Foo", "foo"); err != nil {
+		t.Fatalf("case only rename: %v", err)
+	}
+	if got := names(); !slices.Equal(got, []string{"foo"}) {
+		t.Errorf("after case rename: %v", got)
+	}
+	// The from tag is found without regard to case, and a case clash is a conflict.
+	if err := e.repo.ReplaceTags(ctx, scope, []int64{ids[2]}, []string{"Bar"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.repo.RenameTag(ctx, scope, "FOO", "BAR"); !errors.Is(err, messages.ErrTagExists) {
+		t.Errorf("rename onto a case variant: %v", err)
+	}
+	if err := e.repo.RenameTag(ctx, scope, "FOO", "baz"); err != nil {
+		t.Errorf("rename found by another case: %v", err)
+	}
+	if err := e.repo.DeleteTag(ctx, scope, "BAZ"); err != nil {
+		t.Errorf("delete found by another case: %v", err)
+	}
+	if got := names(); !slices.Equal(got, []string{"Bar"}) {
+		t.Errorf("after delete: %v", got)
+	}
+}
+
+func TestRenameTagEdgeCases(t *testing.T) {
+	e := newEnv(t)
+	ids := seedCompat(t, e)
+	scope := authz.Trusted(e.pid)
+	ctx := context.Background()
+	if err := e.repo.ReplaceTags(ctx, scope, []int64{ids[0]}, []string{"keep"}); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		from, to string
+		want     error
+	}{
+		{"missing from, same name", "ghost", "ghost", messages.ErrTagNotFound},
+		{"missing from", "ghost", "other", messages.ErrTagNotFound},
+		{"invalid from is not found", "a/b", "other", messages.ErrTagNotFound},
+		{"empty from is not found", "", "other", messages.ErrTagNotFound},
+		{"invalid to", "keep", "a/b", messages.ErrInvalidTag},
+		{"existing tag to itself", "keep", "keep", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := e.repo.RenameTag(ctx, scope, tc.from, tc.to); !errors.Is(err, tc.want) {
+				t.Errorf("got %v want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// Writers that set the same tags in opposite orders must not deadlock.
+func TestReplaceTagsConcurrentOppositeOrders(t *testing.T) {
+	e := newEnv(t)
+	ids := seedCompat(t, e)
+	scope := authz.Trusted(e.pid)
+	ctx := context.Background()
+	asc := []string{"t01", "t02", "t03", "t04", "t05", "t06", "t07", "t08"}
+	desc := slices.Clone(asc)
+	slices.Reverse(desc)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := 0; round < 5; round++ {
+				names := asc
+				if i%2 == 1 {
+					names = desc
+				}
+				// Fresh tag names each round so the upserts really insert.
+				fresh := make([]string, 0, len(names))
+				for _, n := range names {
+					fresh = append(fresh, fmt.Sprintf("%s-%d", n, round))
+				}
+				if err := e.repo.ReplaceTags(ctx, scope, []int64{ids[i%len(ids)]}, fresh); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }

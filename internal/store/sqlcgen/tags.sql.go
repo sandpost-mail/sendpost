@@ -112,8 +112,10 @@ func (q *Queries) ListTagRules(ctx context.Context, projectID int64) ([]TagRule,
 
 const upsertTags = `-- name: UpsertTags :many
 INSERT INTO tags (project_id, name)
-SELECT $1::bigint, n FROM unnest($2::text[]) AS n
-ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name
+SELECT $1::bigint, n
+FROM (SELECT DISTINCT ON (lower(x)) x AS n FROM unnest($2::text[]) AS x ORDER BY lower(x), x) AS d
+ORDER BY lower(n)
+ON CONFLICT (project_id, lower(name)) DO UPDATE SET name = tags.name
 RETURNING id
 `
 
@@ -122,6 +124,9 @@ type UpsertTagsParams struct {
 	Names     []string
 }
 
+// Tag names are unique without regard to case (the first spelling wins).
+// Names go in sorted order, so concurrent writers lock tag rows in the same
+// order and can not deadlock.
 func (q *Queries) UpsertTags(ctx context.Context, arg UpsertTagsParams) ([]int64, error) {
 	rows, err := q.db.Query(ctx, upsertTags, arg.ProjectID, arg.Names)
 	if err != nil {
