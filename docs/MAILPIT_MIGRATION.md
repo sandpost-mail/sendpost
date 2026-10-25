@@ -50,7 +50,8 @@ Create an SMTP credential in the project settings and send with it (the settings
 - `GET /api/v1/message/{id}` marks the message read, as in Mailpit.
 - Search is a subset: addresses, subject, tags, `is:`, `has:`, dates and sizes work, see the syntax table. Display names of recipients are not searched.
 - A search with an invalid date answers 400 (Mailpit ignores the term).
-- Not available (answers 501): HTTP send API, release, chaos, HTML and link checks, SpamAssassin, attachment thumbnails.
+- Not available (answers 501): HTTP send API, chaos, HTML and link checks, SpamAssassin, attachment thumbnails.
+- Release works differently: it needs a transport and a delivery policy on the project (project settings, owner role), and only sends to addresses on the allowlist.
 - `/view/{id}.html` and `.txt` are served at `/view/...` of the Sandpost host (or `/p/{slug}/view/...`) and need the same credentials.
 - No unauthenticated access: a missing or wrong token answers 401.
 

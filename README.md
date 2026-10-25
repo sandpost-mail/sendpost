@@ -2,7 +2,7 @@
 
 Self-hosted email capture and safe delivery for development, staging and CI. One Go binary, a Svelte UI, Postgres. See [docs/PRD.md](docs/PRD.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/BACKLOG.md](docs/BACKLOG.md).
 
-Status: early development. M1 (capture core) is done: apps send mail through authenticated SMTP and it is stored and streamed live. M2 (access control) is done: login, sessions, users, groups, project roles, API tokens and an audit log, with the whole native API behind them, and the web UI for login, administration, tokens and audit (see "Access control" below). M3 (Mailpit-compatible API) is implemented: tests written for Mailpit work against `/api/v1` with a project token (see "Mailpit-compatible API" below). Running real Mailpit client libraries against it is still to do.
+Status: early development. M1 (capture core) is done: apps send mail through authenticated SMTP and it is stored and streamed live. M2 (access control) is done: login, sessions, users, groups, project roles, API tokens and an audit log, with the whole native API behind them, and the web UI for login, administration, tokens and audit (see "Access control" below). M3 (Mailpit-compatible API) is implemented: tests written for Mailpit work against `/api/v1` with a project token (see "Mailpit-compatible API" below). Running real Mailpit client libraries against it is still to do. M4 (delivery policy) is implemented: optional outbound delivery through a per-project SMTP relay with an allowlist, redirect mode and manual release (see "Delivery policy" below).
 
 ## Quick start
 
@@ -80,11 +80,25 @@ An existing per-project Mailpit setup moves to Sandpost by changing the base URL
 curl -u x:$SANDPOST_TOKEN 'localhost:8080/api/v1/search?query=to:user@example.test&limit=5'
 ```
 
-Reads need the `read` scope, delete and tag changes need `write`. Message ids are decimal strings. Not supported (answers 501): send, release, chaos, HTML/link/spam checks, thumbnails. See [docs/MAILPIT_COMPATIBILITY.md](docs/MAILPIT_COMPATIBILITY.md) for the endpoint matrix, the search syntax and the deviations, and [docs/MAILPIT_MIGRATION.md](docs/MAILPIT_MIGRATION.md) for the migration steps. The vendored contract is in [docs/mailpit](docs/mailpit).
+Reads need the `read` scope, delete and tag changes need `write`. Message ids are decimal strings. Release works with a transport and an allowlist (see Delivery policy). Not supported (answers 501): send, chaos, HTML/link/spam checks, thumbnails. See [docs/MAILPIT_COMPATIBILITY.md](docs/MAILPIT_COMPATIBILITY.md) for the endpoint matrix, the search syntax and the deviations, and [docs/MAILPIT_MIGRATION.md](docs/MAILPIT_MIGRATION.md) for the migration steps. The vendored contract is in [docs/mailpit](docs/mailpit).
+
+## Delivery policy
+
+Off by default: Sandpost only captures mail. A project owner can add one outbound SMTP relay (Settings, Delivery: generic SMTP or Amazon SES SMTP) and a policy:
+
+- **Capture only** (default): nothing is ever sent.
+- **Allow**: recipients on the allowlist (addresses or whole domains such as `@example.com`) get the mail for real, the others get nothing.
+- **Redirect**: allowlisted recipients get the mail for real, every other recipient is replaced by one redirect address. The original recipients are kept in `X-Original-To` and `X-Original-Cc`, the subject can get a prefix.
+
+The envelope is rewritten, not only the headers, `Bcc` is never sent, and allowed and redirected recipients are delivered as separate messages. A copy always stays in Sandpost. Anything unclear fails closed: a missing or disabled transport, an invalid allowlist entry or redirect address, an unparsable recipient, a password that can not be decrypted: nothing is sent, and the Delivery tab of the message says why. A new transport starts disabled, and changing its host, port, user, encryption or type disables it again and asks for the password again. Certificates are always verified and a password is never sent without TLS.
+
+The relay password is encrypted at rest with a key derived from `SECRET_KEY`. After changing `SECRET_KEY`, owners have to enter their relay passwords again. Delivery runs as jobs on [River](https://github.com/riverqueue/river) (Postgres backed, MPL-2.0, used unmodified): up to 5 attempts, with a status per recipient. `sandpost migrate up` also creates River's tables.
+
+A message can also be released manually to specific addresses (message page, Delivery tab, or Mailpit's `POST /api/v1/message/{ID}/release`). Every target must be on the allowlist and the transport must be enabled. Settings need the owner role, a release needs member, the delivery status of a message needs viewer. See ARCHITECTURE for the details.
 
 ## Commands
 
-`sandpost serve`, `sandpost migrate [up|down|status]`, `sandpost admin`.
+`sandpost serve`, `sandpost migrate [up|down|status]` (up also applies River's job queue migrations, down only rolls back Sandpost's own), `sandpost admin`.
 
 ### Account recovery (`sandpost admin`)
 

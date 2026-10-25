@@ -173,8 +173,54 @@ Shapes
 - Tags: a project's tag list is derived from `message_tags`, unused tag rows are pruned after deletions and tag changes (`FOR UPDATE SKIP LOCKED`, so a concurrent ingest that has just upserted a tag is never raced). Tag names follow Mailpit's rule (letters, digits, space and `- _ . @`, at most 100), invalid names are dropped. Migration `00006` makes tag names unique without regard to case (`lower(name)`, merging existing variants), `UpsertTags` conflicts on it and inserts names in sorted order so concurrent writers can not deadlock.
 
 Not done
-- Thumbnails (image decoding of untrusted input, no resize dependency), send, release (M4), chaos, HTML/link/SpamAssassin checks. Deleting through this API does not publish an event on the SSE stream yet.
+- Thumbnails (image decoding of untrusted input, no resize dependency), send, chaos (release came with M4), HTML/link/SpamAssassin checks. Deleting through this API does not publish an event on the SSE stream yet.
 - Running real Mailpit client libraries and Mailpit's own examples against Sandpost (backlog 3.4) needs network access and their toolchains, it is open.
+
+### M4 implementation notes
+
+Packages
+- `internal/policy`: the engine, pure functions (no database, network or clock). `Evaluate` (policy run after capture) and `EvaluateRelease` (manual release) return a `Plan`: one `Decision` per original recipient and at most one allowed and one redirected `Outbound`. `Outbound` has private fields and can only be built by those two functions. `internal/delivery.Relay.Send` accepts nothing else, so an address that did not pass the engine can not reach the wire.
+- `internal/delivery`: transport and policy settings, manual release, delivery rows, the River worker and the SMTP relay client. `internal/secrets`: AES-256-GCM for relay passwords. `internal/testutil/relay.go`: a fake SMTP relay for tests.
+
+Engine rules (all covered by table driven tests, `internal/policy`)
+- The recipient set is the SMTP envelope (`RCPT TO`, stored as `message_recipients` kind `envelope`), not the headers. Header To and Cc are only used to fill `X-Original-To` and `X-Original-Cc` on redirected mail.
+- Fail closed means `*BlockedError` and an empty plan. Blocking cases: unknown or empty mode, no transport, transport disabled, invalid transport sender, any invalid allowlist entry (the whole list is rejected), missing or invalid redirect address in redirect mode, subject prefix with control characters or over 100 characters, no envelope recipient, and any envelope recipient that does not parse. One bad recipient blocks the whole message, because a recipient the engine can not read is one it can not classify. Capture mode (or no policy row) never sends and never blocks.
+- Addresses are validated strictly (`policy.ParseAddress`): plain `local@domain`, ASCII only, dot-atom local part without `% ! |`, at least two labels, no IP literals, no display names, no quoted local parts, no comments, at most 254 characters. The domain is lower cased.
+- Allowlist entries are `user@example.com`, `@example.com` or `example.com`. Matching is case insensitive and exact: no wildcards, and `@example.com` does not include subdomains. An empty allowlist is valid (allow mode sends nothing, redirect mode redirects everything).
+- Allowed recipients go in one message, all redirected recipients in a second one with the single redirect address as envelope recipient, so neither side sees the other's headers. The second one carries `X-Original-To`, `X-Original-Cc` and the subject prefix (RFC 2047 encoded when not ASCII).
+- Header rewriting touches only the top level header block: `Bcc` and any `X-Original-*` (also `X-Original-Bcc`) are removed from every outbound message (sender supplied ones can not be trusted or leak), everything else and the body are kept byte for byte, with the original line endings.
+- Envelope sender: the original MAIL FROM is not stored, so the engine uses the transport's `sender` (validated) or the null sender. Bounces therefore never reach a real mailbox by default. Amazon SES needs a verified sender, the `ses` kind requires one.
+- Manual release needs a stored policy (its allowlist is the gate, whatever the mode), an enabled transport and every target on the allowlist. One refused target refuses the whole release, nothing is queued. It does not widen anything in redirect mode. Release is allowed in capture mode on purpose: it is an explicit action by a member and still limited to the allowlist.
+
+Data
+- Migration `00007_delivery.sql`: `transports` (one per project, kind `smtp` or `ses`, TLS mode `starttls`, `implicit` or `none`, `sender`, `enabled` false by default), `delivery_policies` (mode, allowlist jsonb, redirect address, subject prefix) and `deliveries`. The engine validates policy data again on every send, so rows written around the API still fail closed (the e2e test injects them with SQL).
+- `deliveries` has a `project_id` (not in the early sketch of section 3): every query filters on it and the worker loads the message with `project_id` in the `WHERE`. One row per original recipient and run, unique on `(message_id, run, recipient)`. `run` is `auto` (the policy run after capture) or `release:<id>`. Kinds `deliver`, `redirect`, `release`, `skip`, `blocked`, statuses `pending`, `sent`, `failed`, `skipped`, `blocked`. A run the engine refused gets its pending rows set to `blocked` plus one row with an empty recipient holding the reason. Redirected recipients share the outcome of the one redirect message.
+- Transport passwords are sealed with AES-256-GCM. The key is `HMAC-SHA256(SECRET_KEY, "sandpost/transport-secret/v1")`, the nonce is random and the additional data is `transport:<project id>`, so a blob copied to another project does not open. Format: version byte, nonce, ciphertext. Passwords are never returned (`has_secret` only), never put in audit details, job arguments or logs (`RelayConfig` redacts itself in `fmt` and `slog`).
+- Key rotation: the key is a function of `SECRET_KEY`, so after changing it every stored transport password fails to open and delivery fails closed (the run is blocked with "password can not be decrypted", the connection test says so). Procedure: change `SECRET_KEY` (this also invalidates SMTP credentials and API tokens, see the PRD), restart, and have each project owner enter the relay password again in Settings. There is no online re-encryption.
+
+Jobs (River)
+- River runs on the same Postgres, no Redis. Its tables come from River's own migrator, run by `store.MigrateUp` right after the goose migrations (`sandpost migrate up` leaves one complete schema, `migrate status` lists River's versions as `river:<name>`). `migrate down` rolls back goose migrations only. A test asserts that nothing is pending after `MigrateUp`. River v0.49.0 is pinned.
+- Ingest queues the job in the capture transaction through `ingest.Hook` (`delivery.Enqueuer`), only when the project's policy mode is not capture. The hook runs in a savepoint: if it fails the savepoint is rolled back, the failure is logged and the message is still stored (tested with a failing queue). A crash can not leave a committed message without its job, and a failed enqueue never loses mail.
+- Every attempt re-reads the message, recipients, policy and transport and runs the engine again before the first SMTP command. Nothing persisted from an earlier attempt authorizes a send, so switching a project to capture, narrowing the allowlist or disabling the transport stops mail that is still queued (tested). A blocked run ends without retry. The job arguments carry ids (and the normalized targets of a release), never message content or secrets.
+- Retries are bounded: `MaxAttempts` is 5 with River's default backoff (about 1s, 16s, 81s, 4m). An SMTP 5xx answer for a recipient, a TLS or certificate problem and a missing STARTTLS are permanent (the row fails at once, the job does not retry for it). 4xx answers, network errors and timeouts are transient: the row stays `pending` with the error text and `attempts`, only pending recipients are tried again, and after the last attempt they become `failed` ("gave up, retries exhausted"). Delivery is at least once: a crash between the relay accepting a message and the row update can send it twice.
+- The job timeout is 3 minutes, 4 workers per process.
+
+SMTP relay client (`delivery.SMTPRelay`, emersion/go-smtp)
+- TLS modes: `starttls` fails when the relay does not offer STARTTLS (it never downgrades), `implicit` is TLS from the first byte, `none` is plaintext and can not be combined with a username (the client refuses to send credentials without TLS, and the API refuses to store them). Certificates are always verified against the system roots, with TLS 1.2 as minimum, there is no option to skip verification. The password is only sent after the secured session exists.
+- AUTH PLAIN, or LOGIN when only that is offered. One `MAIL FROM`, one `RCPT TO` per envelope recipient with a per recipient result (a refused recipient does not stop the others), then DATA. When every recipient is refused no DATA is sent.
+- Relay text stored in `deliveries.error` is cleaned: control characters removed, the password masked if echoed, 300 characters at most.
+- Connection test (`POST .../transport/test`): connects, secures, authenticates, NOOP, QUIT, sends no mail. It only tests the stored settings, never unsaved ones. Its error text is built from the failed step and the SMTP code only, never from what the remote host said, so it can not be used to read banners.
+- Changing the connection settings (kind, host, port, username, TLS mode) of a transport disables it again and requires the password to be entered again. Together with "test uses stored settings", this means the stored password can only ever be sent to the host the owner saw it saved for (and that they re-confirmed with the password). A new transport starts disabled and `enabled` is ignored on creation.
+- A project owner chooses the relay host, so the connection test and the delivery job connect to an address the owner picks, including internal ones. This is deliberate (relays on private networks are the common case) but it is an SSRF surface: only owners can do it, only SMTP is spoken, remote text is not echoed. Restricting target ranges can be added as a deployment option later.
+
+API and authorization
+- Native routes (all in `routes.go`, so the authorization matrix, leakage suite and OpenAPI check cover them): `GET|PUT|DELETE /projects/{pid}/transport`, `POST .../transport/test`, `GET|PUT .../policy` (all `project.manage`, owners), `GET .../messages/{mid}/deliveries` (`messages.read`), `POST .../messages/{mid}/release` (`messages.write`, answers 202 with the pending rows, 400 with code `delivery_blocked` and the reason when the engine refuses). A message id of another project answers 404 like an unknown one, for both message routes.
+- Release needs `messages.write` (member) rather than owner: a member can only send to addresses the owner put on the allowlist, and CI tests that release with a project token (capped at member) keep working. Mailpit's `POST /api/v1/message/{ID}/release` uses the same service (body `{"To": [...]}`, answers `ok`, 400 with the reason, `latest` supported) and replaces the former 501.
+- Audit: `transport.update` (kind, host, port, TLS mode, enabled, whether a username exists and whether the password changed, never the password or username), `transport.delete`, `policy.update` (mode, allowlist, redirect address) and `message.release` (targets).
+
+UI (item 4.6)
+- Project settings (owners) has a Delivery section: transport form (generic SMTP and an Amazon SES preset, password field that never shows the stored value and is required again when the connection changes, enable and disable with confirmation, connection test with its result) and the policy form (three modes with plain explanations, allowlist textarea, redirect address and subject prefix). `lib/delivery.ts` turns the form state into explicit warnings: nothing is sent (no transport, disabled, empty allowlist, no redirect address), real mail will be delivered to the allowlist, whole domains are allowed, the redirect target receives everything else. Saving a policy that can send real mail asks for a confirmation that lists the allowlist.
+- Each message has a Delivery tab: one row per recipient with status, redirect target, error and attempts (it refreshes while something is pending), and for members and owners a release form that asks for confirmation before it queues. Viewers see the status only.
 
 ## 3. Data model (Postgres)
 
@@ -200,9 +246,10 @@ message_tags(message_id, tag_id)
 tag_rules(id, project_id, match, tag)                 -- header or recipient based
 comments(id, message_id, user_id, body, created_at)
 
-transports(id, project_id, kind, host, port, username, secret_enc, tls_mode, enabled)
+transports(id, project_id unique, kind, host, port, username, secret_enc, tls_mode, sender, enabled, created_at, updated_at)
 delivery_policies(project_id, mode, allowlist jsonb, redirect_address, subject_prefix)
-deliveries(id, message_id, recipient, effective_recipient, status, error, attempts, created_at)
+deliveries(id, project_id, message_id, run, kind, recipient, effective_recipient, status, error, attempts,
+           created_at, updated_at, sent_at)   -- unique (message_id, run, recipient), see the M4 notes
 
 audit_log(id, at, actor_user_id, project_id null, action, target, detail jsonb)
 ```
@@ -235,7 +282,9 @@ Notes:
 cmd/sandpost/           main, subcommands: serve, migrate, admin
 internal/smtpd/        listener, auth
 internal/ingest/       parsing, persistence, tag rules
-internal/policy/       policy evaluation, delivery jobs
+internal/policy/       policy engine (pure functions)
+internal/delivery/     transports, policy settings, release, River worker, SMTP relay client
+internal/secrets/      AES-GCM for transport passwords
 internal/authz/        roles, scoped repositories
 internal/api/          native handlers
 internal/api/compat_*  Mailpit-compatible handlers (in the api package, not a separate mpcompat, see M3 notes)
@@ -272,4 +321,4 @@ Still open:
 - The `sandpost` organization on GitHub is taken, so the project uses `sandpost-mail` (existence and ownership of that org still to confirm).
 - Trademark search (INPI, EUIPO, USPTO) not done.
 - Copyright holder for the LICENSE file (deferred by the user for now).
-- River's MPL-2.0 license is file-level copyleft. Using it unmodified under an MIT project is generally fine, but the release notices should list it. Confirm before the first release.
+- River's MPL-2.0 license is file-level copyleft. Using it unmodified under an MIT project is generally fine, but the release notices should list it. Confirm before the first release. M4 added these modules: `github.com/riverqueue/river`, `river/riverdriver`, `river/riverdriver/riverpgxv5`, `river/rivershared`, `river/rivertype` (all v0.49.0, MPL-2.0, unmodified) and its transitive `github.com/tidwall/gjson`, `match`, `pretty`, `sjson` (MIT). The MPL-2.0 notice and the River source location must go in the release notices (backlog 6.6).
