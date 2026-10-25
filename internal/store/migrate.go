@@ -41,7 +41,7 @@ func provider(pool *pgxpool.Pool) (*goose.Provider, error) {
 }
 
 // MigrateUp applies all pending migrations under a Postgres advisory lock and
-// returns the number applied.
+// returns the number applied. The job queue's own migrations run last.
 func MigrateUp(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	p, err := provider(pool)
 	if err != nil {
@@ -51,7 +51,11 @@ func MigrateUp(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("migrate up: %w", err)
 	}
-	return len(res), nil
+	n, err := riverUp(ctx, pool)
+	if err != nil {
+		return 0, err
+	}
+	return len(res) + n, nil
 }
 
 // MigrateDown rolls back the most recent migration.
@@ -84,5 +88,9 @@ func MigrationStatuses(ctx context.Context, pool *pgxpool.Pool) ([]MigrationStat
 			Applied: s.State == goose.StateApplied,
 		})
 	}
-	return out, nil
+	rs, err := riverStatuses(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, rs...), nil
 }

@@ -39,6 +39,9 @@ func TestMigrateAndQueries(t *testing.T) {
 	if err != nil || n == 0 {
 		t.Fatalf("up: n=%d err=%v", n, err)
 	}
+	if pending, err := store.RiverPending(ctx, pool); err != nil || pending != 0 {
+		t.Fatalf("river migrations pending after migrate up: %d %v", pending, err)
+	}
 	if n, err = store.MigrateUp(ctx, pool); err != nil || n != 0 {
 		t.Fatalf("second up should be a no-op: n=%d err=%v", n, err)
 	}
@@ -62,8 +65,16 @@ func TestMigrateAndQueries(t *testing.T) {
 	if err := store.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	if _, err := pool.Exec(ctx, "DROP INDEX tags_project_lower_name_idx"); err == nil {
-		t.Fatal("the tag index should be gone after rolling back the latest migration")
+	for _, tbl := range []string{"deliveries", "delivery_policies", "transports"} {
+		if _, err := pool.Exec(ctx, "SELECT 1 FROM "+tbl); err == nil {
+			t.Fatalf("%s should be gone after rolling back the latest migration", tbl)
+		}
+	}
+	if _, err := pool.Exec(ctx, "SELECT 1 FROM river_job"); err != nil {
+		t.Fatalf("the job queue schema is not rolled back with the goose migrations: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "DROP INDEX tags_project_lower_name_idx"); err != nil {
+		t.Fatalf("older migrations must stay applied: %v", err)
 	}
 	if _, err := pool.Exec(ctx, "SELECT 1 FROM pg_proc WHERE proname = 'sp_filter_match'"); err != nil {
 		t.Fatalf("older migrations must stay applied: %v", err)

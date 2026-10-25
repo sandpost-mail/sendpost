@@ -45,6 +45,31 @@ type AuditLog struct {
 	Detail      []byte
 }
 
+type Delivery struct {
+	ID                 int64
+	ProjectID          int64
+	MessageID          int64
+	Run                string
+	Kind               string
+	Recipient          string
+	EffectiveRecipient string
+	Status             string
+	Error              string
+	Attempts           int32
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	SentAt             *time.Time
+}
+
+type DeliveryPolicy struct {
+	ProjectID       int64
+	Mode            string
+	Allowlist       []byte
+	RedirectAddress string
+	SubjectPrefix   string
+	UpdatedAt       time.Time
+}
+
 type Group struct {
 	ID        int64
 	Name      string
@@ -141,6 +166,21 @@ type TagRule struct {
 	Pattern    string
 	Tag        string
 	CreatedAt  time.Time
+}
+
+type Transport struct {
+	ID        int64
+	ProjectID int64
+	Kind      string
+	Host      string
+	Port      int32
+	Username  string
+	SecretEnc []byte
+	TlsMode   string
+	Sender    string
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type User struct {
