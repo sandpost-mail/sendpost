@@ -123,7 +123,7 @@ func (s *server) compatRoutes() []compatRoute {
 		s.unsupported("GET", "/message/{ID}/html-check"),
 		s.unsupported("GET", "/message/{ID}/link-check"),
 		s.unsupported("GET", "/message/{ID}/sa-check"),
-		s.unsupported("POST", "/message/{ID}/release"),
+		{method: "POST", path: "/message/{ID}/release", cap: write, h: s.compatRelease},
 
 		{method: "GET", path: "/tags", cap: read, h: s.compatTags},
 		{method: "PUT", path: "/tags", cap: write, h: s.compatSetTags},

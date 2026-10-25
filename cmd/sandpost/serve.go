@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sandpost-mail/sandpost/internal/api"
@@ -19,6 +21,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/config"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
+	"github.com/sandpost-mail/sandpost/internal/delivery"
 	"github.com/sandpost-mail/sandpost/internal/events"
 	"github.com/sandpost-mail/sandpost/internal/groups"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
@@ -58,7 +61,16 @@ func runServe(ctx context.Context, e env) error {
 		return err
 	}
 
-	smtpSrv, err := newSMTPServer(cfg, pool, log)
+	// Delivery: the job queue, its worker and the relay client. Captured mail
+	// is only ever sent by the worker, after the policy engine allowed it.
+	relay := &delivery.SMTPRelay{}
+	jobs, err := delivery.NewRiverClient(pool, delivery.NewWorker(pool, cfg.SecretKey, relay, log), log)
+	if err != nil {
+		return err
+	}
+	queue := delivery.NewRiverQueue(jobs)
+
+	smtpSrv, err := newSMTPServer(cfg, pool, ingest.NewService(pool).WithHook(delivery.NewEnqueuer(queue), log), log)
 	if err != nil {
 		return err
 	}
@@ -79,6 +91,7 @@ func runServe(ctx context.Context, e env) error {
 		Projects:     projects.New(pool),
 		Credentials:  credentials.New(pool, cfg.SecretKey),
 		Messages:     messages.New(pool),
+		Delivery:     delivery.NewService(pool, cfg.SecretKey, relay, queue),
 		Bus:          bus,
 		Info:         serverInfo(cfg),
 		CookieSecure: cfg.CookieSecure,
@@ -98,16 +111,17 @@ func runServe(ctx context.Context, e env) error {
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return runJobs(gctx, jobs, log) })
 	g.Go(func() error { return bus.Run(gctx) })
 	g.Go(func() error { return smtpSrv.Serve(gctx, smtpLn) })
 	g.Go(func() error { return serveHTTP(gctx, httpLn, handler, log) })
 	return g.Wait()
 }
 
-func newSMTPServer(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger) (*smtpd.Server, error) {
+func newSMTPServer(cfg config.Config, pool *pgxpool.Pool, ing *ingest.Service, log *slog.Logger) (*smtpd.Server, error) {
 	opts := smtpd.Options{
 		Verifier:        credentials.New(pool, cfg.SecretKey),
-		Ingester:        ingest.NewService(pool),
+		Ingester:        ing,
 		Log:             log,
 		MaxMessageBytes: cfg.MaxMessageBytes,
 		TLSMode:         cfg.SMTPTLSMode,
@@ -158,6 +172,23 @@ func serveHTTP(ctx context.Context, ln net.Listener, h http.Handler, log *slog.L
 	}
 	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http server: %w", err)
+	}
+	return nil
+}
+
+// runJobs runs the delivery workers until ctx is cancelled, then lets running
+// jobs finish (bounded by shutdownTimeout).
+func runJobs(ctx context.Context, c *river.Client[pgx.Tx], log *slog.Logger) error {
+	// The client outlives ctx so that Stop can finish running jobs.
+	if err := c.Start(context.WithoutCancel(ctx)); err != nil {
+		return fmt.Errorf("start job queue: %w", err)
+	}
+	log.Info("job queue started")
+	<-ctx.Done()
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	if err := c.Stop(sctx); err != nil {
+		return fmt.Errorf("stop job queue: %w", err)
 	}
 	return nil
 }

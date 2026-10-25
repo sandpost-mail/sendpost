@@ -247,7 +247,7 @@ func checkRoute(t *testing.T, r api.RouteInfo, op map[string]any) {
 	if strings.Contains(r.Path, "{pid}") && !has("400") {
 		t.Error("400 (invalid id) is not documented")
 	}
-	if !has("200") && !has("201") && !has("204") {
+	if !has("200") && !has("201") && !has("202") && !has("204") {
 		t.Error("no success response documented")
 	}
 	if (r.Method == "POST" || r.Method == "PATCH") && takesBody(r) && op["requestBody"] == nil {
@@ -267,7 +267,7 @@ func hasAnonymousOption(sec []any) bool {
 // takesBody is false for the POST routes that take no body at all.
 func takesBody(r api.RouteInfo) bool {
 	switch fmt.Sprintf("%s %s", r.Method, r.Path) {
-	case "POST /auth/logout", "POST /projects/{pid}/messages/{mid}/read":
+	case "POST /auth/logout", "POST /projects/{pid}/messages/{mid}/read", "POST /projects/{pid}/transport/test":
 		return false
 	}
 	return true

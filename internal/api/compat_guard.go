@@ -7,6 +7,7 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/messages"
+	"github.com/sandpost-mail/sandpost/internal/policy"
 	"github.com/sandpost-mail/sandpost/internal/projects"
 	"github.com/sandpost-mail/sandpost/internal/search"
 	"github.com/sandpost-mail/sandpost/internal/tokens"
@@ -137,6 +138,8 @@ func (s *server) compatFail(w http.ResponseWriter, r *http.Request, err error) {
 		compatNotFound(w)
 	case errors.Is(err, authz.ErrForbidden):
 		compatText(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, policy.ErrBlocked):
+		compatText(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, search.ErrInvalidDate), errors.Is(err, search.ErrQueryTooLong),
 		errors.Is(err, messages.ErrEmptyFilter), errors.Is(err, search.ErrTooManyTerms),
 		errors.Is(err, search.ErrSizeTooLarge), errors.Is(err, messages.ErrTagExists), errors.Is(err, messages.ErrInvalidTag):
