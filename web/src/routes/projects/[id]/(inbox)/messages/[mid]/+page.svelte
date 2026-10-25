@@ -2,13 +2,14 @@
   import { getContext } from 'svelte';
   import { api, errorMessage, messageUrl } from '$lib/api';
   import { bytes, fullDate } from '$lib/format';
+  import MessageDeliveries from '$lib/components/MessageDeliveries.svelte';
   import type { Inbox } from '$lib/inbox.svelte';
   import type { MessageDetail } from '$lib/types';
 
   let { data } = $props();
   const inbox = getContext<Inbox>('inbox');
 
-  type Tab = 'html' | 'text' | 'source' | 'headers' | 'attachments' | 'links';
+  type Tab = 'html' | 'text' | 'source' | 'headers' | 'attachments' | 'links' | 'delivery';
 
   let message = $derived<MessageDetail>(data.message);
   let tab = $state<Tab>('text');
@@ -60,7 +61,8 @@
     { id: 'source', label: 'Source' },
     { id: 'headers', label: `Headers (${Object.keys(message.headers).length})` },
     { id: 'attachments', label: `Attachments (${message.attachments.length})` },
-    { id: 'links', label: `Links (${message.links.length})` }
+    { id: 'links', label: `Links (${message.links.length})` },
+    { id: 'delivery', label: 'Delivery' }
   ]);
 
   const kinds = ['to', 'cc', 'bcc', 'envelope'] as const;
@@ -164,6 +166,10 @@
           </tbody>
         </table>
       {/if}
+    {:else if tab === 'delivery'}
+      {#key message.id}
+        <MessageDeliveries projectId={data.projectId} messageId={message.id} canRelease={data.canWrite} />
+      {/key}
     {:else if tab === 'links'}
       {#if message.links.length === 0}
         <p class="muted">No links found.</p>
