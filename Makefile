@@ -2,7 +2,7 @@ SHELL := /bin/sh
 BIN := bin/sandpost
 COMPOSE := docker compose -f deploy/docker-compose.yml --env-file deploy/.env
 
-.PHONY: help build test lint openapi migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean
+.PHONY: help build test test-gate lint openapi migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean
 
 help:
 	@echo "targets: build test lint openapi migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean"
@@ -13,6 +13,10 @@ build: web
 
 test:
 	go test -race -cover ./...
+
+# Regression gate: race tests, fails on any skipped test or a package under COVER_MIN (default 80).
+test-gate:
+	./scripts/test-gate.sh
 
 lint:
 	golangci-lint run ./...
