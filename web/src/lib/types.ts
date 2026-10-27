@@ -193,3 +193,76 @@ export interface PreviewUrl {
   url: string;
   expires_at: string;
 }
+
+export type TransportKind = 'smtp' | 'ses';
+export type TlsMode = 'starttls' | 'implicit' | 'none';
+
+/** The outbound relay of a project. The password is never returned, only `has_secret`. */
+export interface Transport {
+  kind: TransportKind;
+  host: string;
+  port: number;
+  username: string;
+  has_secret: boolean;
+  tls_mode: TlsMode;
+  sender: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TransportInput {
+  kind: TransportKind;
+  host: string;
+  port: number;
+  username: string;
+  /** Omit to keep the stored password (only while the connection is unchanged), empty to clear it. */
+  secret?: string;
+  tls_mode: TlsMode;
+  sender: string;
+  enabled: boolean;
+}
+
+export interface TransportCheck {
+  ok: boolean;
+  tls: boolean;
+  authenticated: boolean;
+  error?: string;
+}
+
+export type DeliveryMode = 'capture' | 'allow' | 'redirect';
+
+export interface DeliveryPolicy {
+  mode: DeliveryMode;
+  allowlist: string[];
+  redirect_address: string;
+  subject_prefix: string;
+  configured: boolean;
+  updated_at: string;
+}
+
+export interface DeliveryPolicyInput {
+  mode: DeliveryMode;
+  allowlist: string[];
+  redirect_address: string;
+  subject_prefix: string;
+}
+
+export type DeliveryStatus = 'pending' | 'sent' | 'failed' | 'skipped' | 'blocked';
+
+/** The outcome for one recipient of a message. */
+export interface Delivery {
+  id: number;
+  message_id: number;
+  run: string;
+  kind: 'deliver' | 'redirect' | 'release' | 'skip' | 'blocked';
+  /** The original recipient, empty on the row that records a blocked run. */
+  recipient: string;
+  effective_recipient: string;
+  status: DeliveryStatus;
+  error: string;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+  sent_at: string | null;
+}

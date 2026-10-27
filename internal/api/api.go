@@ -13,6 +13,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/auth"
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
+	"github.com/sandpost-mail/sandpost/internal/delivery"
 	"github.com/sandpost-mail/sandpost/internal/events"
 	"github.com/sandpost-mail/sandpost/internal/groups"
 	"github.com/sandpost-mail/sandpost/internal/messages"
@@ -49,6 +50,7 @@ type Deps struct {
 	Projects    *projects.Service
 	Credentials *credentials.Service
 	Messages    *messages.Repository
+	Delivery    *delivery.Service
 	Bus         *events.Bus
 	Info        ServerInfo
 	// CookieSecure marks the session cookie Secure (and uses the __Host-

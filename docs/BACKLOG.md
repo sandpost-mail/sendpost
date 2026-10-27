@@ -63,7 +63,7 @@ Status: 2.1 to 2.9 implemented (see ARCHITECTURE, M2 implementation notes and M2
 
 Exit criteria: an existing test suite using Mailpit works by changing the base URL and token.
 
-Status: 3.1, 3.2, 3.3 and 3.5 implemented, 3.4 partly. Pinned to Mailpit v1.31.6 with its swagger vendored in `docs/mailpit/`. The offline compatibility suite (`internal/api/compat_*_test.go`) replays Mailpit shaped requests, validates every JSON response against that swagger and runs cross tenant tests, and `docs/MAILPIT_COMPATIBILITY.md` is the matrix (kept in step with the route table by a test). Still open in 3.4: running real Mailpit client libraries and Mailpit's own examples against Sandpost (needs network and those toolchains), so the exit criterion is proven at the contract level only. Not implemented and answering 501: send, release (waits for M4), chaos, HTML/link/SpamAssassin checks, thumbnails. See ARCHITECTURE, M3 implementation notes.
+Status: 3.1, 3.2, 3.3 and 3.5 implemented, 3.4 partly. Pinned to Mailpit v1.31.6 with its swagger vendored in `docs/mailpit/`. The offline compatibility suite (`internal/api/compat_*_test.go`) replays Mailpit shaped requests, validates every JSON response against that swagger and runs cross tenant tests, and `docs/MAILPIT_COMPATIBILITY.md` is the matrix (kept in step with the route table by a test). Still open in 3.4: running real Mailpit client libraries and Mailpit's own examples against Sandpost (needs network and those toolchains), so the exit criterion is proven at the contract level only. Not implemented and answering 501: send, chaos, HTML/link/SpamAssassin checks, thumbnails. Release was added with M4. See ARCHITECTURE, M3 implementation notes.
 
 ## M4. Delivery policy
 
@@ -78,6 +78,8 @@ Status: 3.1, 3.2, 3.3 and 3.5 implemented, 3.4 partly. Pinned to Mailpit v1.31.6
 | 4.7 | End-to-end test with a fake relay proving no real recipient is contacted when misconfigured | M |
 
 Exit criteria: the redirect and allow modes are covered by tests, and any misconfiguration results in no outbound mail.
+
+Status: 4.1 to 4.7 implemented (see ARCHITECTURE, M4 implementation notes). The engine (`internal/policy`) lists every fail-closed case in a table driven test, `cmd/sandpost/e2e_delivery_test.go` runs SMTP, River and a fake relay end to end and shows that a trap relay receives no connection under each misconfiguration. The Mailpit release endpoint now works (matrix updated). River (MPL-2.0) is a new dependency, noted in ARCHITECTURE for the release notices. Not covered: a relay is reached from the server, so owners can point it at internal addresses (documented as an SSRF note), and key rotation has no online re-encryption.
 
 ## M5. CI helpers and collaboration
 

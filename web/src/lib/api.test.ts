@@ -73,4 +73,17 @@ describe('api client', () => {
     await client(g).createProjectToken(7, { label: 'ci', scopes: ['read'] });
     expect(JSON.parse(g.mock.calls[0][1].body)).toEqual({ label: 'ci', scopes: ['read'] });
   });
+
+  it('unwraps the transport and sends the delivery requests', async () => {
+    const f = vi.fn().mockResolvedValueOnce(reply(200, { transport: null })).mockResolvedValue(reply(202, { items: [{ id: 1 }] }));
+    const c = client(f);
+    expect(await c.getTransport(3)).toBeNull();
+    expect(f.mock.calls[0][0]).toBe('/_/api/v1/projects/3/transport');
+
+    setCsrfToken('t');
+    expect(await c.releaseMessage(3, 9, ['a@x.test'])).toEqual([{ id: 1 }]);
+    const [url, init] = f.mock.calls[1];
+    expect(url).toBe('/_/api/v1/projects/3/messages/9/release');
+    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ to: ['a@x.test'] }) });
+  });
 });

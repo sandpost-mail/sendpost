@@ -4,12 +4,12 @@ import { failLoad } from '$lib/loadError';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async ({ params, parent, fetch }) => {
-  const { projectId } = await parent();
+  const { projectId, access } = await parent();
   const messageId = Number(params.mid);
   if (!Number.isInteger(messageId) || messageId <= 0) error(404, 'Message not found');
   try {
     const message = await client(fetch).getMessage(projectId, messageId);
-    return { projectId, message };
+    return { projectId, message, canWrite: access.canWrite };
   } catch (e) {
     failLoad(e, 'message');
   }

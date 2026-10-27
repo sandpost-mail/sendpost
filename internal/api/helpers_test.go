@@ -21,6 +21,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/auth"
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
+	"github.com/sandpost-mail/sandpost/internal/delivery"
 	"github.com/sandpost-mail/sandpost/internal/events"
 	"github.com/sandpost-mail/sandpost/internal/groups"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
@@ -61,6 +62,10 @@ func newApp(t *testing.T, opts ...func(*api.Deps)) *app {
 	go func() { defer close(done); _ = bus.Run(bctx) }()
 	t.Cleanup(func() { cancel(); <-done })
 
+	jobs, err := delivery.NewRiverClient(pool, nil, log)
+	if err != nil {
+		t.Fatal(err)
+	}
 	authSvc, err := auth.NewService(pool, testSecretKey)
 	if err != nil {
 		t.Fatal(err)
@@ -72,8 +77,9 @@ func newApp(t *testing.T, opts ...func(*api.Deps)) *app {
 		Signer:   authz.NewSigner(testSecretKey),
 		Projects: projects.New(pool), Credentials: credentials.New(pool, testSecretKey),
 		Messages: messages.New(pool), Bus: bus, Log: log,
-		Info: api.ServerInfo{SMTPPort: 1025, SMTPTLSMode: "off", Version: "test"},
-		UI:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ui")) }),
+		Delivery: delivery.NewService(pool, testSecretKey, &delivery.SMTPRelay{}, delivery.NewRiverQueue(jobs)),
+		Info:     api.ServerInfo{SMTPPort: 1025, SMTPTLSMode: "off", Version: "test"},
+		UI:       http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ui")) }),
 	}
 	for _, opt := range opts {
 		opt(&deps)

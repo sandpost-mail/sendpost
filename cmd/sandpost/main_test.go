@@ -77,7 +77,7 @@ func TestMigrateAndServe(t *testing.T) {
 
 	for _, step := range []struct{ arg, want string }{
 		{"status", "pending"},
-		{"up", "applied 6 migration(s)"},
+		{"up", "applied 15 migration(s)"},
 		{"status", "applied"},
 		{"down", "rolled back"},
 		{"up", "applied 1 migration(s)"},

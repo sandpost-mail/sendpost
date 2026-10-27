@@ -15,7 +15,7 @@ Sandpost serves a subset of the [Mailpit](https://github.com/axllent/mailpit) RE
 
 - The token goes in `Authorization: Bearer <token>`, or as the **password** of HTTP Basic auth with any username (what Mailpit clients already send). The session cookie is never read on these routes, so they need no CSRF header and a browser can not be made to use them.
 - A user token (`spu_...`) on the bare `/api/v1` answers 403 (it names no project), use the `/p/{slug}` form.
-- Permissions follow the native API. Reads (list, search, get, headers, raw, part, view, tags, info) and marking messages read need the `read` scope (viewer). Delete and tag changes need `write` (member). A project token holds at most member.
+- Permissions follow the native API. Reads (list, search, get, headers, raw, part, view, tags, info) and marking messages read need the `read` scope (viewer). Delete, tag changes and release need `write` (member). A project token holds at most member.
 - A project the caller has no role on, a token of another project and an unknown slug all answer the same `404 page not found`. Message ids of another project behave like unknown ids: reads answer 404, writes by id succeed and change nothing.
 - Without credentials: 401, with a `WWW-Authenticate: Basic` challenge when no `Authorization` header was sent at all. Wrong credentials: 401 without challenge.
 - Errors are plain text like Mailpit (`404 page not found`, 400 with a message). Mutations answer `ok`. Unexpected failures are logged and answer a generic 500.
@@ -45,7 +45,7 @@ Status: `implemented` (same behaviour apart from the notes), `partial` (works wi
 | GET | `/api/v1/message/{ID}/html-check` | unsupported | HTML compatibility check is not offered. |
 | GET | `/api/v1/message/{ID}/link-check` | unsupported | Link checking would make the server fetch URLs from captured mail. |
 | GET | `/api/v1/message/{ID}/sa-check` | unsupported | SpamAssassin is not integrated. |
-| POST | `/api/v1/message/{ID}/release` | unsupported | Planned with the delivery policy (manual release to an allowlisted address). |
+| POST | `/api/v1/message/{ID}/release` | partial | Body `{"To": [...]}`. Sends through the project's transport (set up in the UI, see the delivery policy), and only to addresses on the project allowlist. Answers `ok` once the release is queued (a job sends it, the delivery status is in the UI and `GET /_/api/v1/projects/{pid}/messages/{mid}/deliveries`). 400 with the reason when a target is not allowlisted, the transport is missing or disabled, or `To` is empty. Needs `write` (member). `latest` works. Mailpit relays to any address through its single global relay, Sandpost refuses everything off the allowlist. |
 | GET | `/api/v1/tags` | implemented | Tags in use in the project, sorted. |
 | PUT | `/api/v1/tags` | implemented | Replaces the tags of the given messages. Invalid names are dropped, case duplicates collapse (the first spelling wins), as in Mailpit. Tag names are case insensitive. |
 | PUT | `/api/v1/tags/{Tag}` | implemented | Rename, also a change of case only. The tag is found without regard to case. 404 when the tag does not exist (even when the new name is the same), 400 when the new name is invalid or used by another tag. Mailpit answers 400 for a missing tag. |

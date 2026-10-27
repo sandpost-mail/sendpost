@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Sandpost native API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     The native API of Sandpost, served under `/_/api/v1`. It is what the web UI uses.
 
@@ -41,6 +41,11 @@ tags:
     description: API tokens of users and projects.
   - name: messages
     description: Captured messages, previews and the live event stream.
+  - name: delivery
+    description: |
+      Optional outbound delivery of captured mail: the project's relay (transport), its policy
+      (capture, allow, redirect), manual release and the delivery status of a message. Off by default,
+      and any misconfiguration results in no outbound mail.
   - name: audit
     description: Audit log of administrative actions.
 security:
@@ -944,6 +949,198 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /projects/{pid}/transport:
+    get:
+      tags: [delivery]
+      operationId: getTransport
+      summary: The outbound SMTP relay of the project, or null
+      description: The password is never returned, only `has_secret`.
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: The transport, `null` when none is configured
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transport]
+                properties:
+                  transport:
+                    type: object
+                    nullable: true
+                    allOf: [{ $ref: "#/components/schemas/Transport" }]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [delivery]
+      operationId: putTransport
+      summary: Create or replace the outbound SMTP relay
+      description: |
+        A new transport starts disabled (`enabled` is ignored on creation). Changing the connection
+        (kind, host, port, username, tls_mode) disables it again and requires the password to be sent
+        again, so a stored password can never be sent to a host that was just typed in. `secret` is
+        kept when omitted and the connection did not change, cleared when empty. `tls_mode`
+        `starttls` fails when the relay does not offer it, certificates are always verified,
+        a username needs TLS. Kind `ses` needs a username, TLS and a verified `sender`.
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TransportInput" }
+      responses:
+        "200":
+          description: The stored transport
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transport" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [delivery]
+      operationId: deleteTransport
+      summary: Remove the outbound relay and its stored password
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "204": { description: Removed }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/transport/test:
+    post:
+      tags: [delivery]
+      operationId: testTransport
+      summary: Test the stored relay connection
+      description: |
+        Connects with the stored settings, secures the connection and authenticates, and sends no mail.
+        Works while the transport is disabled. Only the stored settings are tested, never unsaved ones.
+        The error text never contains anything the remote host said.
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: The result, `ok` false with an `error` when the test failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransportCheck" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/policy:
+    get:
+      tags: [delivery]
+      operationId: getDeliveryPolicy
+      summary: The delivery policy of the project (capture when none is stored)
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      responses:
+        "200":
+          description: The policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliveryPolicy" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [delivery]
+      operationId: putDeliveryPolicy
+      summary: Replace the delivery policy
+      description: |
+        Modes: `capture` (nothing is sent, default), `allow` (recipients on the allowlist get the mail,
+        the others none) and `redirect` (the others are replaced by `redirect_address`). Allowlist entries
+        are `user@example.com`, `@example.com` or `example.com`, no wildcards and no subdomain matching.
+        Sending needs an enabled transport, otherwise the engine blocks and nothing is sent.
+      x-required-capability: project.manage
+      parameters: [{ $ref: "#/components/parameters/pid" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliveryPolicyInput" }
+      responses:
+        "200":
+          description: The stored policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliveryPolicy" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/deliveries:
+    get:
+      tags: [delivery]
+      operationId: listMessageDeliveries
+      summary: Outbound delivery status per recipient of a message
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+      responses:
+        "200":
+          description: One row per original recipient and run, oldest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliveryList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/release:
+    post:
+      tags: [delivery]
+      operationId: releaseMessage
+      summary: Release a captured message to allowlisted addresses
+      description: |
+        Queues a job that sends the message to the given addresses through the project's transport.
+        Every address must be on the allowlist and the transport must be enabled (the mode does not matter,
+        a release is an explicit action), otherwise nothing is queued and the answer is 400 with code
+        `delivery_blocked`. The job checks again when it runs. The original recipients are not contacted,
+        Bcc is not sent. Needs `messages.write`.
+      x-required-capability: messages.write
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              additionalProperties: false
+              properties:
+                to:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { type: string }
+      responses:
+        "202":
+          description: Queued, the rows are pending
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliveryList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   securitySchemes:
     cookieAuth:
@@ -1009,7 +1206,82 @@ components:
       required: [error]
       properties:
         error: { type: string }
-        code: { type: string, description: "Stable machine readable code: unauthenticated, csrf_invalid, password_change_required, invalid_credentials, too_many_attempts" }
+        code: { type: string, description: "Stable machine readable code: unauthenticated, csrf_invalid, password_change_required, invalid_credentials, too_many_attempts, delivery_blocked" }
+    Transport:
+      type: object
+      required: [kind, host, port, username, has_secret, tls_mode, sender, enabled, created_at, updated_at]
+      properties:
+        kind: { type: string, enum: [smtp, ses] }
+        host: { type: string }
+        port: { type: integer }
+        username: { type: string }
+        has_secret: { type: boolean, description: "Whether a password is stored, it is never returned" }
+        tls_mode: { type: string, enum: [starttls, implicit, none] }
+        sender: { type: string, description: "Envelope sender (MAIL FROM), empty for the null sender" }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TransportInput:
+      type: object
+      required: [kind, host, port, tls_mode]
+      additionalProperties: false
+      properties:
+        kind: { type: string, enum: [smtp, ses] }
+        host: { type: string, maxLength: 253 }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        username: { type: string, maxLength: 255 }
+        secret: { type: string, nullable: true, description: "Password. Omit or null to keep the stored one, empty to clear it" }
+        tls_mode: { type: string, enum: [starttls, implicit, none] }
+        sender: { type: string }
+        enabled: { type: boolean }
+    TransportCheck:
+      type: object
+      required: [ok, tls, authenticated]
+      properties:
+        ok: { type: boolean }
+        tls: { type: boolean }
+        authenticated: { type: boolean }
+        error: { type: string }
+    DeliveryPolicy:
+      type: object
+      required: [mode, allowlist, redirect_address, subject_prefix, configured, updated_at]
+      properties:
+        mode: { type: string, enum: [capture, allow, redirect] }
+        allowlist: { type: array, items: { type: string } }
+        redirect_address: { type: string }
+        subject_prefix: { type: string }
+        configured: { type: boolean, description: "False when no policy is stored (capture)" }
+        updated_at: { type: string, format: date-time }
+    DeliveryPolicyInput:
+      type: object
+      required: [mode]
+      additionalProperties: false
+      properties:
+        mode: { type: string, enum: [capture, allow, redirect] }
+        allowlist: { type: array, maxItems: 500, items: { type: string } }
+        redirect_address: { type: string, description: "Required in redirect mode" }
+        subject_prefix: { type: string, maxLength: 100, description: "Prefix of the subject of redirected copies" }
+    Delivery:
+      type: object
+      required: [id, message_id, run, kind, recipient, effective_recipient, status, error, attempts, created_at, updated_at, sent_at]
+      properties:
+        id: { type: integer, format: int64 }
+        message_id: { type: integer, format: int64 }
+        run: { type: string, description: "`auto` for what the policy did after capture, `release:<id>` for a manual release" }
+        kind: { type: string, enum: [deliver, redirect, release, skip, blocked] }
+        recipient: { type: string, description: "Original recipient, empty on the row that records a blocked run" }
+        effective_recipient: { type: string, description: "Where the mail went, empty when skipped" }
+        status: { type: string, enum: [pending, sent, failed, skipped, blocked] }
+        error: { type: string, description: "Reason of a skip, block or failure, never a secret" }
+        attempts: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        sent_at: { type: string, format: date-time, nullable: true }
+    DeliveryList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Delivery" } }
     Role:
       type: string
       enum: [viewer, member, owner]

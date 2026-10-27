@@ -121,7 +121,7 @@ func TestCompatMatrixMatchesRoutes(t *testing.T) {
 func TestCompatCapabilities(t *testing.T) {
 	writes := map[string]bool{
 		"DELETE /api/v1/messages": true, "DELETE /api/v1/search": true, "PUT /api/v1/tags": true,
-		"PUT /api/v1/tags/{Tag}": true, "DELETE /api/v1/tags/{Tag}": true,
+		"PUT /api/v1/tags/{Tag}": true, "DELETE /api/v1/tags/{Tag}": true, "POST /api/v1/message/{ID}/release": true,
 	}
 	for _, rt := range api.CompatRoutes() {
 		want := "messages.read"

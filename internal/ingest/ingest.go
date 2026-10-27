@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -33,15 +34,59 @@ type Input struct {
 	Raw          []byte
 }
 
+// Hook runs inside the ingest transaction, after the message rows exist. The
+// delivery package uses it to queue the policy run in the same transaction,
+// so a committed message always has its job. A failing hook never fails the
+// capture: it runs in a savepoint that is rolled back, the message is stored
+// and the error is logged.
+type Hook interface {
+	AfterInsert(ctx context.Context, tx pgx.Tx, projectID, messageID int64) error
+}
+
 // Service ingests messages.
 type Service struct {
-	db  TxBeginner
-	now func() time.Time
+	db   TxBeginner
+	now  func() time.Time
+	hook Hook
+	log  *slog.Logger
 }
 
 // NewService returns a Service storing into db.
 func NewService(db TxBeginner) *Service {
-	return &Service{db: db, now: time.Now}
+	return &Service{db: db, now: time.Now, log: slog.New(slog.DiscardHandler)}
+}
+
+// WithHook returns a copy of s that calls h inside every ingest transaction.
+// Failures are logged to log (nil discards them).
+func (s *Service) WithHook(h Hook, log *slog.Logger) *Service {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	c := *s
+	c.hook, c.log = h, log
+	return &c
+}
+
+// runHook calls the hook in a savepoint. Nothing it does or fails at can
+// affect the capture.
+func (s *Service) runHook(ctx context.Context, tx pgx.Tx, projectID, messageID int64) {
+	if s.hook == nil {
+		return
+	}
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		s.log.Error("ingest hook: savepoint", "project_id", projectID, "message_id", messageID, "error", err)
+		return
+	}
+	if err := s.hook.AfterInsert(ctx, sp, projectID, messageID); err != nil {
+		_ = sp.Rollback(context.WithoutCancel(ctx))
+		s.log.Error("ingest hook failed, the message is stored without its delivery job",
+			"project_id", projectID, "message_id", messageID, "error", err)
+		return
+	}
+	if err := sp.Commit(ctx); err != nil {
+		s.log.Error("ingest hook: release savepoint", "project_id", projectID, "message_id", messageID, "error", err)
+	}
 }
 
 // Ingest parses and stores a message and returns its id. Parsing never fails,
@@ -87,6 +132,7 @@ func (s *Service) Ingest(ctx context.Context, in Input) (int64, error) {
 	if err := applyTagRules(ctx, q, in.ProjectID, row.ID, parsed); err != nil {
 		return 0, err
 	}
+	s.runHook(ctx, tx, in.ProjectID, row.ID)
 	ev := events.Event{Type: events.TypeMessageCreated, MessageID: row.ID}
 	if err := events.Notify(ctx, tx, in.ProjectID, ev); err != nil {
 		return 0, err

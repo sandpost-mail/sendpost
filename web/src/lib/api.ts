@@ -2,6 +2,9 @@ import type {
   Assignment,
   AuditPage,
   Credential,
+  Delivery,
+  DeliveryPolicy,
+  DeliveryPolicyInput,
   Group,
   IssuedCredential,
   IssuedToken,
@@ -17,6 +20,9 @@ import type {
   TagRuleInput,
   Token,
   TokenInput,
+  Transport,
+  TransportCheck,
+  TransportInput,
   User,
   UserInput,
   UserPatch
@@ -208,7 +214,24 @@ export function client(f: Fetch = fetch) {
     createTagRule: (projectId: number, rule: TagRuleInput) =>
       send<TagRule>('POST', `/projects/${projectId}/tag-rules`, rule),
     deleteTagRule: (projectId: number, id: number) =>
-      send<void>('DELETE', `/projects/${projectId}/tag-rules/${id}`)
+      send<void>('DELETE', `/projects/${projectId}/tag-rules/${id}`),
+
+    // Delivery: relay, policy, release and status (owners manage, members release).
+    getTransport: async (projectId: number) =>
+      (await get<{ transport: Transport | null }>(`/projects/${projectId}/transport`)).transport,
+    putTransport: (projectId: number, input: TransportInput) =>
+      send<Transport>('PUT', `/projects/${projectId}/transport`, input),
+    deleteTransport: (projectId: number) => send<void>('DELETE', `/projects/${projectId}/transport`),
+    testTransport: (projectId: number) =>
+      send<TransportCheck>('POST', `/projects/${projectId}/transport/test`),
+    getPolicy: (projectId: number) => get<DeliveryPolicy>(`/projects/${projectId}/policy`),
+    putPolicy: (projectId: number, input: DeliveryPolicyInput) =>
+      send<DeliveryPolicy>('PUT', `/projects/${projectId}/policy`, input),
+    listDeliveries: (projectId: number, messageId: number) =>
+      items<Delivery>(`/projects/${projectId}/messages/${messageId}/deliveries`),
+    releaseMessage: async (projectId: number, messageId: number, to: string[]) =>
+      (await send<{ items: Delivery[] }>('POST', `/projects/${projectId}/messages/${messageId}/release`, { to }))
+        .items
   };
 }
 

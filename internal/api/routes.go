@@ -148,9 +148,18 @@ func (s *server) routes() []route {
 		{method: "POST", path: p + "/tag-rules", access: accessProject, cap: authz.CapManageProject, h: s.createTagRule},
 		{method: "DELETE", path: p + "/tag-rules/{rid}", access: accessProject, cap: authz.CapManageProject, h: s.deleteTagRule},
 
+		{method: "GET", path: p + "/transport", access: accessProject, cap: authz.CapManageProject, h: s.getTransport},
+		{method: "PUT", path: p + "/transport", access: accessProject, cap: authz.CapManageProject, h: s.putTransport},
+		{method: "DELETE", path: p + "/transport", access: accessProject, cap: authz.CapManageProject, h: s.deleteTransport},
+		{method: "POST", path: p + "/transport/test", access: accessProject, cap: authz.CapManageProject, h: s.testTransport},
+		{method: "GET", path: p + "/policy", access: accessProject, cap: authz.CapManageProject, h: s.getPolicy},
+		{method: "PUT", path: p + "/policy", access: accessProject, cap: authz.CapManageProject, h: s.putPolicy},
+
 		{method: "GET", path: p + "/messages", access: accessProject, cap: authz.CapReadMessages, h: s.listMessages},
 		{method: "GET", path: p + "/messages/{mid}", access: accessProject, cap: authz.CapReadMessages, h: s.getMessage},
 		{method: "POST", path: p + "/messages/{mid}/read", access: accessProject, cap: authz.CapReadMessages, h: s.markRead},
+		{method: "GET", path: p + "/messages/{mid}/deliveries", access: accessProject, cap: authz.CapReadMessages, h: s.listDeliveries},
+		{method: "POST", path: p + "/messages/{mid}/release", access: accessProject, cap: authz.CapWriteMessages, h: s.releaseMessage},
 		{method: "GET", path: p + "/messages/{mid}/raw", access: accessProject, cap: authz.CapReadMessages, h: s.rawMessage},
 		{method: "GET", path: p + "/messages/{mid}/preview-url", access: accessProject, cap: authz.CapReadMessages, h: s.previewURL},
 		{method: "GET", path: p + "/messages/{mid}/html", access: accessSigned, cap: authz.CapReadMessages, resource: htmlResource, h: s.htmlMessage},

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, errorMessage } from '$lib/api';
+  import DeliverySettings from '$lib/components/DeliverySettings.svelte';
   import EnvSnippet from '$lib/components/EnvSnippet.svelte';
   import ProjectAccess from '$lib/components/ProjectAccess.svelte';
   import TokenManager from '$lib/components/TokenManager.svelte';
@@ -194,6 +195,7 @@
   </section>
 
   {#key data.projectId}
+    <DeliverySettings projectId={data.projectId} />
     <TokenManager
       id="project-tokens"
       heading="Project API tokens"
