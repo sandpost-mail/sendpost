@@ -96,7 +96,7 @@ export interface TagRuleInput {
   tag: string;
 }
 
-export type LiveEventType = 'ready' | 'message.created' | 'resync';
+export type LiveEventType = 'ready' | 'message.created' | 'comment.created' | 'resync';
 
 export interface User {
   id: number;
@@ -265,4 +265,39 @@ export interface Delivery {
   created_at: string;
   updated_at: string;
   sent_at: string | null;
+}
+
+/** A comment on a message. The text is plain text: render it as text, never as HTML. */
+export interface Comment {
+  id: number;
+  message_id: number;
+  /** Null for a comment written with a project token, or by a deleted user. */
+  user_id: number | null;
+  author: string;
+  body: string;
+  created_at: string;
+}
+
+export interface CommentPage {
+  items: Comment[];
+  next_cursor: string;
+}
+
+export type ActivityKind = 'message' | 'comment' | 'release';
+
+export interface ActivityItem {
+  at: string;
+  kind: ActivityKind;
+  id: number;
+  /** The message concerned, 0 when it is gone. */
+  message_id: number;
+  subject: string;
+  actor: string;
+  /** A comment excerpt or the release targets. */
+  detail: string;
+}
+
+export interface ActivityPage {
+  items: ActivityItem[];
+  next_cursor: string;
 }

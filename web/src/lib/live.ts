@@ -11,7 +11,7 @@ export interface LiveHandlers {
   onClosed?: () => void;
 }
 
-const EVENT_TYPES: LiveEventType[] = ['ready', 'message.created', 'resync'];
+const EVENT_TYPES: LiveEventType[] = ['ready', 'message.created', 'comment.created', 'resync'];
 
 /**
  * Subscribe to a project's server-sent events. EventSource reconnects by
