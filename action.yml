@@ -1,0 +1,124 @@
+name: Sandpost
+description: Wait for mail in a Sandpost project and extract verification links or one-time codes in CI.
+author: sandpost-mail
+
+# Composite action. It builds the "sandpost" CLI from the action's own checkout
+# (so the CLI always matches the action ref) and adds it to PATH. There is no
+# release binary to download yet.
+#
+#   - uses: sandpost-mail/sendpost@main
+#     with: { command: install }          # sandpost on PATH for later steps
+#   - uses: sandpost-mail/sendpost@main
+#     id: code
+#     with:
+#       command: extract
+#       server-url: ${{ vars.SANDPOST_URL }}
+#       project: ${{ vars.SANDPOST_PROJECT }}
+#       token: ${{ secrets.SANDPOST_TOKEN }}
+#       run-id: ${{ github.run_id }}-${{ github.run_attempt }}
+#       query: subject:welcome
+
+branding:
+  icon: mail
+  color: blue
+
+inputs:
+  command:
+    description: "install (only put the CLI on PATH), wait or extract"
+    default: install
+  server-url:
+    description: Sandpost address, for example https://sandpost.example.com
+    default: ""
+  project:
+    description: Numeric project id
+    default: ""
+  token:
+    description: Project API token (scope read is enough). Store it as a secret.
+    default: ""
+  run-id:
+    description: >-
+      Run id to isolate on. Use the same value the application under test sends
+      as the X-Run-Id header. Empty: SANDPOST_RUN_ID, then GITHUB_RUN_ID.
+    default: ""
+  query:
+    description: Message search, same syntax as the inbox (subject:welcome to:me@example.test)
+    default: ""
+  count:
+    description: wait only, messages to wait for (1 to 50)
+    default: "1"
+  timeout:
+    description: Seconds to wait (0 to 120)
+    default: "30"
+  after-id:
+    description: Only messages with an id greater than this
+    default: ""
+  message-id:
+    description: extract only, read this message instead of waiting for one
+    default: ""
+  print:
+    description: extract only, code or link (default, see the CLI help)
+    default: ""
+  link-contains:
+    description: extract only, keep links containing this text
+    default: ""
+  code-pattern:
+    description: extract only, RE2 pattern for the code (group 1 when present)
+    default: ""
+  latest:
+    description: extract only, use the newest match instead of the oldest ("true")
+    default: "false"
+
+outputs:
+  message-id:
+    description: Id of the first matching message (wait) or the message read (extract)
+    value: ${{ steps.run.outputs.message-id }}
+  message-ids:
+    description: wait only, every matching id, space separated
+    value: ${{ steps.run.outputs.message-ids }}
+  value:
+    description: extract only, the code or link. It is masked in the logs when it is a code.
+    value: ${{ steps.run.outputs.value }}
+  json:
+    description: The CLI's --json output
+    value: ${{ steps.run.outputs.json }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: ${{ github.action_path }}/go.mod
+        cache: false
+
+    - name: Build the sandpost CLI
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        BIN_DIR: ${{ runner.temp }}/sandpost-bin
+      run: |
+        set -euo pipefail
+        mkdir -p "$BIN_DIR"
+        CGO_ENABLED=0 go build -trimpath -o "$BIN_DIR/sandpost" ./cmd/sandpost
+        echo "$BIN_DIR" >> "$GITHUB_PATH"
+
+    - name: Run sandpost
+      id: run
+      if: inputs.command != 'install'
+      shell: bash
+      # Inputs travel as environment variables only, never inside the script text.
+      env:
+        INPUT_COMMAND: ${{ inputs.command }}
+        SANDPOST_URL: ${{ inputs.server-url || env.SANDPOST_URL }}
+        SANDPOST_PROJECT: ${{ inputs.project || env.SANDPOST_PROJECT }}
+        SANDPOST_TOKEN: ${{ inputs.token || env.SANDPOST_TOKEN }}
+        INPUT_RUN_ID: ${{ inputs.run-id }}
+        INPUT_QUERY: ${{ inputs.query }}
+        INPUT_COUNT: ${{ inputs.count }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        INPUT_AFTER_ID: ${{ inputs.after-id }}
+        INPUT_MESSAGE_ID: ${{ inputs.message-id }}
+        INPUT_PRINT: ${{ inputs.print }}
+        INPUT_LINK_CONTAINS: ${{ inputs.link-contains }}
+        INPUT_CODE_PATTERN: ${{ inputs.code-pattern }}
+        INPUT_LATEST: ${{ inputs.latest }}
+      run: ${{ github.action_path }}/.github/scripts/sandpost-action.sh
