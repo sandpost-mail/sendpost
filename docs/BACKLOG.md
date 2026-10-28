@@ -93,6 +93,12 @@ Status: 4.1 to 4.7 implemented (see ARCHITECTURE, M4 implementation notes). The 
 | 5.6 | Message permalink and project activity view | M |
 | 5.7 | Example repos for CI usage (Playwright, pytest, Jest) | M |
 
+Status (5.1 to 5.3): implemented, see ARCHITECTURE, M5 implementation notes: wait, extract, run isolation. `GET /projects/{pid}/wait` (long poll on the event bus, filters, `after_id`, `count`, `timeout`), `GET /projects/{pid}/messages/{mid}/extract` (links and one-time codes) and run isolation by `X-Run-Id` header or `run` parameter, all in `docs/openapi.yaml`. Tenant isolation is cross-checked in `internal/api/wait_test.go`; the generic matrices in `access_test.go` cover both routes. Open: the run filter is not on the list or SSE endpoints, and the header match is unindexed.
+
+Status (5.5 and 5.6): implemented, see ARCHITECTURE, M5 implementation notes: comments, permalink, activity. Comments are plain text (1 to 2000 characters) on `GET|POST /projects/{pid}/messages/{mid}/comments` (read: viewer, write: member, project tokens included), shown in a Comments tab and announced by a `comment.created` event. The permalink is the existing message page address with a copy button, and `GET /projects/{pid}/activity` plus an Activity page list received messages, comments and releases for every role. Not done: editing or deleting a comment, mentions and notifications.
+
+Status (5.4 and 5.7): implemented, see ARCHITECTURE, M5 implementation notes: CLI, action, examples. `sandpost wait` and `sandpost extract` (exit codes 3 timeout and 4 nothing found, `--json`, env fallbacks, run id from `SANDPOST_RUN_ID` or the CI run variable), a composite GitHub Action at the repository root (`action.yml`) and three example projects in `examples/` (Jest, pytest, Playwright). The CLI is tested against a fake API and end to end against a real server; the action script was run locally with the real binary. Not done: the action builds the CLI from source (no release binaries or container image until 6.1), it was not run on a GitHub runner, the example projects were syntax checked but not run against a live server in CI, and the CLI has no retry on connection errors.
+
 ## M6. Release readiness
 
 | ID | Item | Size |

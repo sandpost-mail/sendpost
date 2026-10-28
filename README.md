@@ -52,6 +52,7 @@ Behavior worth knowing:
 - Search syntax in the inbox: `from:` `to:` `subject:` `tag:` `body:` `date:YYYY-MM-DD` `after:` `before:`, quoted values for spaces, plain words match subject and body.
 - Tag rules (Settings) tag messages at ingest by header (for example `X-Run-Id` into `run:{value}`) or recipient, with `*` wildcards.
 - Live updates use Postgres `LISTEN/NOTIFY` and SSE, so every replica pushes to its own browsers.
+- CI helpers: `GET /_/api/v1/projects/{pid}/wait?run=$CI_RUN_ID&q=subject:welcome&timeout=60` blocks until a matching message arrived (or `timed_out` is true), then `GET /_/api/v1/projects/{pid}/messages/{mid}/extract` returns its `links` and one-time `codes`. Have the app under test send an `X-Run-Id: $CI_RUN_ID` header (or send `X-Run-Id` with the request) so parallel runs of one project never see each other's mail. A read-only project token is enough. The same from the command line, or from GitHub Actions: see "CI helpers" under Commands and [examples/](examples/) (Jest, pytest, Playwright).
 - Native API under `/_/api/v1`, described in [docs/openapi.yaml](docs/openapi.yaml). Writes must send `Content-Type: application/json`.
 
 ## Access control
@@ -96,9 +97,45 @@ The relay password is encrypted at rest with a key derived from `SECRET_KEY`. Af
 
 A message can also be released manually to specific addresses (message page, Delivery tab, or Mailpit's `POST /api/v1/message/{ID}/release`). Every target must be on the allowlist and the transport must be enabled. Settings need the owner role, a release needs member, the delivery status of a message needs viewer. See ARCHITECTURE for the details.
 
+## Comments and activity
+
+Members and owners (and project tokens with the `write` scope) can comment on a message, viewers can read the thread: `GET|POST /_/api/v1/projects/{id}/messages/{mid}/comments`, or the Comments tab of the message page. Comments are plain text of 1 to 2000 characters, shown exactly as typed and never as HTML, and they can not be edited or deleted. The address of a message page (`/projects/{id}/messages/{mid}`, "Copy link") works as a permalink: whoever opens it signs in first and needs a role on the project. The Activity page (`GET /_/api/v1/projects/{id}/activity`) lists the messages received, the comments and the manual releases of a project, for every role. Unlike the owner only audit log it carries nothing about settings, credentials or roles.
+
 ## Commands
 
-`sandpost serve`, `sandpost migrate [up|down|status]` (up also applies River's job queue migrations, down only rolls back Sandpost's own), `sandpost admin`.
+`sandpost serve`, `sandpost migrate [up|down|status]` (up also applies River's job queue migrations, down only rolls back Sandpost's own), `sandpost admin`, and the CI helpers `sandpost wait` and `sandpost extract`.
+
+### CI helpers (`sandpost wait`, `sandpost extract`)
+
+They talk to the HTTP API with a project token, so they run anywhere (no database access). Configuration comes from the environment, flags override it:
+
+| Variable | Flag | Meaning |
+|---|---|---|
+| `SANDPOST_URL` | `--server` | server address |
+| `SANDPOST_PROJECT` | `--project` | numeric project id |
+| `SANDPOST_TOKEN` | none | project API token, scope `read` is enough (environment only, so it stays out of `ps` and logs) |
+| `SANDPOST_RUN_ID` | `--run` | run id, then `GITHUB_RUN_ID`, `CI_PIPELINE_ID`, `BUILDKITE_BUILD_ID`, `CIRCLE_WORKFLOW_ID`; `--run=` turns the filter off |
+
+```
+sandpost wait --query 'subject:welcome' --timeout 60          # prints the message id(s), one per line
+CODE=$(sandpost extract --query 'to:me@example.test')          # waits, prints the first one-time code
+LINK=$(sandpost extract --link-contains /verify --run "$RUN")  # first link containing /verify
+sandpost extract --message 42 --code-pattern 'PIN: (\d{4})' --json
+```
+
+`wait` accepts `--query`, `--count` (1 to 50), `--timeout` (seconds or a duration such as `45s`, 0 to 120s, default 30s), `--after-id` and `--json`. `extract` waits like `wait` (and reads the oldest match, `--latest` the newest) unless `--message ID` is given, then prints the first code, or the first link when `--link-contains` is set without `--code-pattern` (`--print code|link` forces it, `--all` prints every value, `--json` prints `message_id`, `value`, `links` and `codes`). Only the value goes to stdout, messages go to stderr.
+
+| Exit | Meaning |
+|---|---|
+| 0 | matched, value printed |
+| 1 | error (server unreachable, 401, 403, 404, 400, ...) |
+| 2 | usage (missing configuration, bad flag or value) |
+| 3 | timeout: fewer than `count` messages (`wait`) or none (`extract`) before the timeout |
+| 4 | `extract`: the message has no such code or link |
+
+Use the same run id for the application under test (header `X-Run-Id`) and the CLI. `GITHUB_RUN_ID` is identical for a re-run of a workflow, so in GitHub Actions set `SANDPOST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}` on the job and send that same value as the header.
+
+GitHub Action (composite, at the repository root): `uses: sandpost-mail/sendpost@main` with `command: install` puts the CLI on `PATH`, `command: wait` or `command: extract` runs it and sets the outputs `message-id`, `message-ids`, `value` (masked in the log when it is a code) and `json`; a timeout fails the step. Inputs: `server-url`, `project`, `token`, `run-id`, `query`, `count`, `timeout`, `after-id`, `message-id`, `print`, `link-contains`, `code-pattern`, `latest`; the URL, project and token also default to `SANDPOST_URL`, `SANDPOST_PROJECT` and `SANDPOST_TOKEN` in the job environment. The action builds the CLI from its own checkout (needs a Linux or macOS runner, no release binaries exist yet). Ready to copy workflows for Jest, pytest and Playwright are in [examples/](examples/).
 
 ### Account recovery (`sandpost admin`)
 

@@ -41,6 +41,8 @@ tags:
     description: API tokens of users and projects.
   - name: messages
     description: Captured messages, previews and the live event stream.
+  - name: comments
+    description: Comments on messages and the project activity feed (messages received, comments, releases).
   - name: delivery
     description: |
       Optional outbound delivery of captured mail: the project's relay (transport), its policy
@@ -931,12 +933,74 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /projects/{pid}/wait:
+    get:
+      tags: [messages]
+      operationId: waitForMessages
+      summary: Long poll until messages matching the filters have arrived
+      description: |
+        Answers as soon as at least `count` messages of the project match, or when `timeout` seconds
+        have passed. Messages received before the call count too, `after_id` skips the ones already
+        seen. Always 200 once authorized: check `timed_out`. Matches are listed oldest first (at most 200).
+
+        Run isolation: `X-Run-Id` (header) or `run` (query, same meaning, both allowed when equal)
+        restricts the match to messages whose own `X-Run-Id` header has that value, or that carry a
+        tag equal to it or to `run:<id>` (the tag a header rule `X-Run-Id` into `run:{value}` produces). `q` supports the same syntax as the message list, `tag:` included.
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: run, in: query, description: "Run id, same as the X-Run-Id header (1 to 100 characters, no control characters)", schema: { type: string, maxLength: 100 } }
+        - { name: X-Run-Id, in: header, description: "Run id, see the description", schema: { type: string, maxLength: 100 } }
+        - { name: after_id, in: query, description: "Only messages with an id greater than this (default 0)", schema: { type: integer, format: int64, minimum: 0 } }
+        - { name: count, in: query, description: "Minimum number of matches to wait for (default 1)", schema: { type: integer, minimum: 1, maximum: 50 } }
+        - { name: timeout, in: query, description: "Seconds to wait (default 30, maximum 120, 0 checks once)", schema: { type: integer, minimum: 0, maximum: 120 } }
+      responses:
+        "200":
+          description: The matches, and whether the wait ended on the timeout
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WaitResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/extract:
+    get:
+      tags: [messages]
+      operationId: extractFromMessage
+      summary: Links and one-time codes of a message
+      description: |
+        `links` are the stored links of the message (HTML anchors first, then bare URLs in the text).
+        `codes` are one-time codes found in the text body, distinct, in order of appearance, at most 20.
+        Without `code_pattern`: codes next to a keyword (code, OTP, PIN, passcode, password, token),
+        otherwise standalone 6 digit numbers (`kind` `keyword` or `digits`). Separators are removed
+        ("482 913" is "482913"). URLs are ignored. With `code_pattern` (RE2) only that pattern is used,
+        `kind` is `custom`, and group 1 is the code when the pattern has a group.
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+        - { name: link, in: query, description: "Keep only links containing this text (case insensitive)", schema: { type: string } }
+        - { name: code_pattern, in: query, description: "RE2 regular expression, at most 200 bytes", schema: { type: string, maxLength: 200 } }
+      responses:
+        "200":
+          description: The extraction
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Extraction" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /projects/{pid}/events:
     get:
       tags: [messages]
       operationId: streamProjectEvents
       summary: Server sent events for new messages
-      description: Events `ready`, `message.created`, `resync`. The stream of a browser session ends when the session expires.
+      description: Events `ready`, `message.created`, `comment.created` (with `message_id`), `resync`. The stream of a browser session ends when the session expires.
       x-required-capability: messages.read
       parameters: [{ $ref: "#/components/parameters/pid" }]
       responses:
@@ -1136,6 +1200,89 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DeliveryList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/messages/{mid}/comments:
+    get:
+      tags: [comments]
+      operationId: listMessageComments
+      summary: Comments of a message, oldest first
+      description: Plain text, escape it when rendering. Needs `messages.read`, so viewers can read the thread.
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: One page (default 100, maximum 200)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommentPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [comments]
+      operationId: createMessageComment
+      summary: Add a comment to a message
+      description: |
+        Needs `messages.write` (member, owner, administrator, or a project token with `write`). The author is the
+        caller: the user's email, or `project token <prefix>` for a project token (then `user_id` is null).
+        The text is plain text, trimmed, 1 to 2000 characters, line breaks and tabs allowed, other control
+        characters rejected. It is stored and returned as typed, never as HTML. A message of another project
+        answers 404 whatever the text is. Publishes a `comment.created` event on the project stream.
+        Comments can not be edited or deleted.
+      x-required-capability: messages.write
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/mid" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              additionalProperties: false
+              properties:
+                body: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Comment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{pid}/activity:
+    get:
+      tags: [comments]
+      operationId: listProjectActivity
+      summary: Activity feed of a project, newest first
+      description: |
+        Messages received, comments and manual releases. Unlike `/audit` (owners only) this feed only carries
+        these three kinds, never transport, policy, credential or role changes, so every reader of the
+        project can see it. `detail` is a comment excerpt (200 characters at most) or the release targets.
+      x-required-capability: messages.read
+      parameters:
+        - { $ref: "#/components/parameters/pid" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivityPage" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1449,6 +1596,26 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/TagRule" } }
+    WaitResult:
+      type: object
+      required: [messages, timed_out]
+      properties:
+        messages: { type: array, items: { $ref: "#/components/schemas/MessageSummary" } }
+        timed_out: { type: boolean, description: "true when fewer than `count` messages matched before the timeout" }
+    Extraction:
+      type: object
+      required: [message_id, links, codes]
+      properties:
+        message_id: { type: integer, format: int64 }
+        links: { type: array, items: { type: string } }
+        codes:
+          type: array
+          items:
+            type: object
+            required: [value, kind]
+            properties:
+              value: { type: string }
+              kind: { type: string, enum: [keyword, digits, custom] }
     MessageSummary:
       type: object
       required: [id, received_at, from, to, subject, size_bytes, read_at, tags, attachment_count]
@@ -1514,6 +1681,39 @@ components:
         action: { type: string, example: credential.create }
         target: { type: string, example: "credential:12" }
         detail: { type: object, description: "Free form, never contains secrets" }
+    Comment:
+      type: object
+      required: [id, message_id, user_id, author, body, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        message_id: { type: integer, format: int64 }
+        user_id: { type: integer, format: int64, nullable: true, description: Null for a project token or a deleted user }
+        author: { type: string, description: "Email, or `project token <prefix>`" }
+        body: { type: string, maxLength: 2000, description: Plain text }
+        created_at: { type: string, format: date-time }
+    CommentPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Comment" } }
+        next_cursor: { type: string, description: Empty on the last page }
+    ActivityItem:
+      type: object
+      required: [at, kind, id, message_id, subject, actor, detail]
+      properties:
+        at: { type: string, format: date-time }
+        kind: { type: string, enum: [message, comment, release] }
+        id: { type: integer, format: int64, description: Id within the kind }
+        message_id: { type: integer, format: int64, description: "The message concerned, 0 when it is gone" }
+        subject: { type: string }
+        actor: { type: string, description: "Sender, comment author or the user who released" }
+        detail: { type: string }
+    ActivityPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ActivityItem" } }
+        next_cursor: { type: string, description: Empty on the last page }
     AuditPage:
       type: object
       required: [items, next_cursor]
