@@ -45,6 +45,16 @@ type AuditLog struct {
 	Detail      []byte
 }
 
+type Comment struct {
+	ID          int64
+	ProjectID   int64
+	MessageID   int64
+	UserID      pgtype.Int8
+	AuthorLabel string
+	Body        string
+	CreatedAt   time.Time
+}
+
 type Delivery struct {
 	ID                 int64
 	ProjectID          int64

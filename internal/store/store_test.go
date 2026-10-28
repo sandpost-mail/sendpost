@@ -65,9 +65,12 @@ func TestMigrateAndQueries(t *testing.T) {
 	if err := store.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("down: %v", err)
 	}
+	if _, err := pool.Exec(ctx, "SELECT 1 FROM comments"); err == nil {
+		t.Fatal("comments should be gone after rolling back the latest migration")
+	}
 	for _, tbl := range []string{"deliveries", "delivery_policies", "transports"} {
-		if _, err := pool.Exec(ctx, "SELECT 1 FROM "+tbl); err == nil {
-			t.Fatalf("%s should be gone after rolling back the latest migration", tbl)
+		if _, err := pool.Exec(ctx, "SELECT 1 FROM "+tbl); err != nil {
+			t.Fatalf("%s: the delivery migration must stay applied: %v", tbl, err)
 		}
 	}
 	if _, err := pool.Exec(ctx, "SELECT 1 FROM river_job"); err != nil {

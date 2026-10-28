@@ -18,6 +18,8 @@ import (
 const (
 	// TypeMessageCreated announces a newly captured message.
 	TypeMessageCreated = "message.created"
+	// TypeCommentCreated announces a new comment on a message (MessageID is the message).
+	TypeCommentCreated = "comment.created"
 	// TypeResync tells subscribers they may have missed events and should reload.
 	TypeResync = "resync"
 	// TypeReady is sent once a subscription is live (SSE only, never via NOTIFY).

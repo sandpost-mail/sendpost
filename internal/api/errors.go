@@ -4,8 +4,10 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/sandpost-mail/sandpost/internal/activity"
 	"github.com/sandpost-mail/sandpost/internal/audit"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/comments"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/delivery"
 	"github.com/sandpost-mail/sandpost/internal/groups"
@@ -43,7 +45,8 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, projects.ErrInvalid), errors.Is(err, credentials.ErrLabelTooLong),
 		errors.Is(err, messages.ErrInvalidCursor), errors.Is(err, audit.ErrInvalidCursor),
 		errors.Is(err, users.ErrInvalid), errors.Is(err, users.ErrWrongPassword),
-		errors.Is(err, groups.ErrInvalid), errors.Is(err, tokens.ErrBadInput), errors.Is(err, delivery.ErrInvalid):
+		errors.Is(err, groups.ErrInvalid), errors.Is(err, tokens.ErrBadInput), errors.Is(err, delivery.ErrInvalid),
+		errors.Is(err, comments.ErrInvalid), errors.Is(err, comments.ErrInvalidCursor), errors.Is(err, activity.ErrInvalidCursor):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		s.Log.Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)

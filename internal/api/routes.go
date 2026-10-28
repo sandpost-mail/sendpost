@@ -160,10 +160,15 @@ func (s *server) routes() []route {
 		{method: "POST", path: p + "/messages/{mid}/read", access: accessProject, cap: authz.CapReadMessages, h: s.markRead},
 		{method: "GET", path: p + "/messages/{mid}/deliveries", access: accessProject, cap: authz.CapReadMessages, h: s.listDeliveries},
 		{method: "POST", path: p + "/messages/{mid}/release", access: accessProject, cap: authz.CapWriteMessages, h: s.releaseMessage},
+		{method: "GET", path: p + "/messages/{mid}/comments", access: accessProject, cap: authz.CapReadMessages, h: s.listComments},
+		{method: "POST", path: p + "/messages/{mid}/comments", access: accessProject, cap: authz.CapWriteMessages, h: s.createComment},
+		{method: "GET", path: p + "/activity", access: accessProject, cap: authz.CapReadMessages, h: s.listActivity},
 		{method: "GET", path: p + "/messages/{mid}/raw", access: accessProject, cap: authz.CapReadMessages, h: s.rawMessage},
 		{method: "GET", path: p + "/messages/{mid}/preview-url", access: accessProject, cap: authz.CapReadMessages, h: s.previewURL},
 		{method: "GET", path: p + "/messages/{mid}/html", access: accessSigned, cap: authz.CapReadMessages, resource: htmlResource, h: s.htmlMessage},
 		{method: "GET", path: p + "/messages/{mid}/attachments/{ordinal}", access: accessSigned, cap: authz.CapReadMessages, resource: attachmentResource, h: s.attachment},
+		{method: "GET", path: p + "/messages/{mid}/extract", access: accessProject, cap: authz.CapReadMessages, h: s.extractMessage},
+		{method: "GET", path: p + "/wait", access: accessProject, cap: authz.CapReadMessages, h: s.waitMessages},
 		{method: "GET", path: p + "/events", access: accessProject, cap: authz.CapReadMessages, h: s.streamEvents},
 	}
 }
