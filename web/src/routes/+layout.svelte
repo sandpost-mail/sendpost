@@ -11,6 +11,7 @@
   let { children } = $props();
   let projectId = $derived(page.params.id);
   let onSettings = $derived(page.url.pathname.endsWith('/settings'));
+  let onActivity = $derived(page.url.pathname.endsWith('/activity'));
   let onAudit = $derived(page.url.pathname.endsWith('/audit'));
   let onAdmin = $derived(page.url.pathname.startsWith('/admin'));
   // Whether the user may use the app (signed in, no password change pending).
@@ -41,7 +42,8 @@
       <ProjectSwitcher />
       {#if projectId}
         <nav aria-label="Project">
-          <a href="/projects/{projectId}" aria-current={!onSettings && !onAudit ? 'page' : undefined}>Inbox</a>
+          <a href="/projects/{projectId}" aria-current={!onSettings && !onAudit && !onActivity ? 'page' : undefined}>Inbox</a>
+          <a href="/projects/{projectId}/activity" aria-current={onActivity ? 'page' : undefined}>Activity</a>
           {#if isOwner}
             <a href="/projects/{projectId}/settings" aria-current={onSettings ? 'page' : undefined}>Settings</a>
             <a href="/projects/{projectId}/audit" aria-current={onAudit ? 'page' : undefined}>Audit</a>

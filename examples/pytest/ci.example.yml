@@ -1,0 +1,28 @@
+# Copy to .github/workflows/ of your repository.
+name: mail-tests
+on: [push, pull_request]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    env:
+      SANDPOST_URL: ${{ vars.SANDPOST_URL }}
+      SANDPOST_PROJECT: ${{ vars.SANDPOST_PROJECT }}
+      SANDPOST_TOKEN: ${{ secrets.SANDPOST_TOKEN }}
+      SANDPOST_SMTP_HOST: ${{ vars.SANDPOST_SMTP_HOST }}
+      SANDPOST_SMTP_PORT: ${{ vars.SANDPOST_SMTP_PORT }}
+      SANDPOST_SMTP_USER: ${{ secrets.SANDPOST_SMTP_USER }}
+      SANDPOST_SMTP_PASSWORD: ${{ secrets.SANDPOST_SMTP_PASSWORD }}
+      # The fixture in conftest.py appends a suffix per test to this base.
+      SANDPOST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sandpost-mail/sendpost@main   # pin a tag or commit once releases exist
+        with:
+          command: install
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: pytest -v

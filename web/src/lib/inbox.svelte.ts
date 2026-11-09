@@ -13,6 +13,8 @@ export class Inbox {
   error = $state('');
   /** Ids that just arrived live, used to flash them briefly. */
   fresh = $state<number[]>([]);
+  /** Bumped on every live event that may change a comment thread, so an open thread reloads. */
+  liveVersion = $state(0);
 
   private cursor = '';
   private generation = 0;
@@ -76,6 +78,11 @@ export class Inbox {
     } catch {
       // A failed background refresh is not worth an error banner.
     }
+  }
+
+  /** Tell open comment threads that something may have changed (comment.created, reconnect). */
+  touch(): void {
+    this.liveVersion++;
   }
 
   markRead(id: number): void {

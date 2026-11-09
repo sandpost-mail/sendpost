@@ -1,0 +1,28 @@
+# Copy to .github/workflows/ of your repository.
+name: mail-tests
+on: [push, pull_request]
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    env:
+      SANDPOST_URL: ${{ vars.SANDPOST_URL }}
+      SANDPOST_PROJECT: ${{ vars.SANDPOST_PROJECT }}
+      SANDPOST_TOKEN: ${{ secrets.SANDPOST_TOKEN }}
+      SANDPOST_SMTP_HOST: ${{ vars.SANDPOST_SMTP_HOST }}
+      SANDPOST_SMTP_PORT: ${{ vars.SANDPOST_SMTP_PORT }}
+      SANDPOST_SMTP_USER: ${{ secrets.SANDPOST_SMTP_USER }}
+      SANDPOST_SMTP_PASSWORD: ${{ secrets.SANDPOST_SMTP_PASSWORD }}
+      # The app under test sends this as X-Run-Id, the CLI filters on it.
+      SANDPOST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sandpost-mail/sendpost@main   # pin a tag or commit once releases exist
+        with:
+          command: install
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test

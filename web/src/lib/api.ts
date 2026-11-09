@@ -1,4 +1,7 @@
 import type {
+  ActivityPage,
+  Comment,
+  CommentPage,
   Assignment,
   AuditPage,
   Credential,
@@ -229,6 +232,14 @@ export function client(f: Fetch = fetch) {
       send<DeliveryPolicy>('PUT', `/projects/${projectId}/policy`, input),
     listDeliveries: (projectId: number, messageId: number) =>
       items<Delivery>(`/projects/${projectId}/messages/${messageId}/deliveries`),
+    // Comments on messages and the project activity feed.
+    listComments: (projectId: number, messageId: number, cursor = '', limit = 100) =>
+      get<CommentPage>(`/projects/${projectId}/messages/${messageId}/comments?${pageQuery(cursor, limit)}`),
+    createComment: (projectId: number, messageId: number, body: string) =>
+      send<Comment>('POST', `/projects/${projectId}/messages/${messageId}/comments`, { body }),
+    listActivity: (projectId: number, cursor = '', limit = 50) =>
+      get<ActivityPage>(`/projects/${projectId}/activity?${pageQuery(cursor, limit)}`),
+
     releaseMessage: async (projectId: number, messageId: number, to: string[]) =>
       (await send<{ items: Delivery[] }>('POST', `/projects/${projectId}/messages/${messageId}/release`, { to }))
         .items

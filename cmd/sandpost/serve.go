@@ -15,10 +15,12 @@ import (
 	"github.com/riverqueue/river"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sandpost-mail/sandpost/internal/activity"
 	"github.com/sandpost-mail/sandpost/internal/api"
 	"github.com/sandpost-mail/sandpost/internal/audit"
 	"github.com/sandpost-mail/sandpost/internal/auth"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/comments"
 	"github.com/sandpost-mail/sandpost/internal/config"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/delivery"
@@ -91,6 +93,8 @@ func runServe(ctx context.Context, e env) error {
 		Projects:     projects.New(pool),
 		Credentials:  credentials.New(pool, cfg.SecretKey),
 		Messages:     messages.New(pool),
+		Comments:     comments.New(pool),
+		Activity:     activity.NewReader(pool),
 		Delivery:     delivery.NewService(pool, cfg.SecretKey, relay, queue),
 		Bus:          bus,
 		Info:         serverInfo(cfg),

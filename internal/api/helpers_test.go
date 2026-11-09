@@ -16,10 +16,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sandpost-mail/sandpost/internal/activity"
 	"github.com/sandpost-mail/sandpost/internal/api"
 	"github.com/sandpost-mail/sandpost/internal/audit"
 	"github.com/sandpost-mail/sandpost/internal/auth"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/comments"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/delivery"
 	"github.com/sandpost-mail/sandpost/internal/events"
@@ -77,6 +79,7 @@ func newApp(t *testing.T, opts ...func(*api.Deps)) *app {
 		Signer:   authz.NewSigner(testSecretKey),
 		Projects: projects.New(pool), Credentials: credentials.New(pool, testSecretKey),
 		Messages: messages.New(pool), Bus: bus, Log: log,
+		Comments: comments.New(pool), Activity: activity.NewReader(pool),
 		Delivery: delivery.NewService(pool, testSecretKey, &delivery.SMTPRelay{}, delivery.NewRiverQueue(jobs)),
 		Info:     api.ServerInfo{SMTPPort: 1025, SMTPTLSMode: "off", Version: "test"},
 		UI:       http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ui")) }),

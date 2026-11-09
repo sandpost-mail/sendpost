@@ -1,15 +1,19 @@
 <script lang="ts">
   import { getContext } from 'svelte';
+  import { page } from '$app/state';
   import { api, errorMessage, messageUrl } from '$lib/api';
   import { bytes, fullDate } from '$lib/format';
+  import CopyButton from '$lib/components/CopyButton.svelte';
+  import MessageComments from '$lib/components/MessageComments.svelte';
   import MessageDeliveries from '$lib/components/MessageDeliveries.svelte';
+  import { messagePermalink } from '$lib/comments';
   import type { Inbox } from '$lib/inbox.svelte';
   import type { MessageDetail } from '$lib/types';
 
   let { data } = $props();
   const inbox = getContext<Inbox>('inbox');
 
-  type Tab = 'html' | 'text' | 'source' | 'headers' | 'attachments' | 'links' | 'delivery';
+  type Tab = 'html' | 'text' | 'source' | 'headers' | 'attachments' | 'links' | 'delivery' | 'comments';
 
   let message = $derived<MessageDetail>(data.message);
   let tab = $state<Tab>('text');
@@ -62,6 +66,7 @@
     { id: 'headers', label: `Headers (${Object.keys(message.headers).length})` },
     { id: 'attachments', label: `Attachments (${message.attachments.length})` },
     { id: 'links', label: `Links (${message.links.length})` },
+    { id: 'comments', label: 'Comments' },
     { id: 'delivery', label: 'Delivery' }
   ]);
 
@@ -89,6 +94,8 @@
     {/if}
     <div class="row actions">
       <a class="btn small" href={url('/raw?download=1')}>Download .eml</a>
+      <!-- The permalink is the page address: it needs a sign in and access to the project. -->
+      <CopyButton text={messagePermalink(page.url.origin, data.projectId, message.id)} label="Copy link" />
     </div>
   </header>
 
@@ -166,6 +173,15 @@
           </tbody>
         </table>
       {/if}
+    {:else if tab === 'comments'}
+      {#key message.id}
+        <MessageComments
+          projectId={data.projectId}
+          messageId={message.id}
+          canComment={data.canWrite}
+          liveVersion={inbox?.liveVersion ?? 0}
+        />
+      {/key}
     {:else if tab === 'delivery'}
       {#key message.id}
         <MessageDeliveries projectId={data.projectId} messageId={message.id} canRelease={data.canWrite} />

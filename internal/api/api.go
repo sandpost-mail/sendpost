@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/sandpost-mail/sandpost/internal/activity"
 	"github.com/sandpost-mail/sandpost/internal/audit"
 	"github.com/sandpost-mail/sandpost/internal/auth"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/comments"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/delivery"
 	"github.com/sandpost-mail/sandpost/internal/events"
@@ -51,6 +53,8 @@ type Deps struct {
 	Credentials *credentials.Service
 	Messages    *messages.Repository
 	Delivery    *delivery.Service
+	Comments    *comments.Service
+	Activity    *activity.Reader
 	Bus         *events.Bus
 	Info        ServerInfo
 	// CookieSecure marks the session cookie Secure (and uses the __Host-

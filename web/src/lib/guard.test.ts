@@ -42,6 +42,16 @@ describe('guardRedirect', () => {
   });
 });
 
+describe('message permalink', () => {
+  it('survives the login round trip', () => {
+    const link = '/projects/3/messages/42';
+    const toLogin = guardRedirect(null, link);
+    expect(toLogin).toBe('/login?next=%2Fprojects%2F3%2Fmessages%2F42');
+    const search = '?' + toLogin!.split('?')[1];
+    expect(guardRedirect(user(), '/login', search)).toBe(link);
+  });
+});
+
 describe('loginUrl', () => {
   it('omits next for the root', () => expect(loginUrl('/')).toBe('/login'));
 });

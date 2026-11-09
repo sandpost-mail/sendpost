@@ -1,8 +1,10 @@
-// Command sandpost is the single Sandpost binary: serve, migrate and admin.
+// Command sandpost is the single Sandpost binary: serve, migrate, admin, and
+// the CI helpers wait and extract.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +24,8 @@ Commands:
   serve            run the HTTP and SMTP servers
   migrate [dir]    apply database migrations (up, down, status; default up)
   admin            account recovery and user tasks (run "sandpost admin help")
+  wait             wait for mail in a project (CI helper, talks to the API)
+  extract          print a link or one-time code from a message (CI helper)
   help             show this help
 `
 
@@ -55,6 +59,10 @@ func run(ctx context.Context, e env, args []string) int {
 		err = runMigrate(ctx, e, args[1:])
 	case "admin":
 		err = runAdmin(ctx, e, args[1:])
+	case "wait":
+		err = runWait(ctx, e, args[1:])
+	case "extract":
+		err = runExtract(ctx, e, args[1:])
 	case "help", "-h", "--help":
 		_, _ = fmt.Fprint(e.stdout, usage)
 		return exitOK
@@ -63,8 +71,13 @@ func run(ctx context.Context, e env, args []string) int {
 		return exitUsage
 	}
 	if err != nil {
+		code := exitError
+		var ce *codedError
+		if errors.As(err, &ce) {
+			code = ce.code
+		}
 		_, _ = fmt.Fprintf(e.stderr, "sandpost %s: %v\n", args[0], err)
-		return exitError
+		return code
 	}
 	return exitOK
 }

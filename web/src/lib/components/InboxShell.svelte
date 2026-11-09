@@ -26,7 +26,10 @@
     inbox.reload('');
     return subscribeToProject(pid, {
       onStatus: (s) => (status = s),
-      onEvent: () => inbox.refreshHead(),
+      onEvent: (type) => {
+        inbox.refreshHead();
+        if (type !== 'message.created') inbox.touch();
+      },
       // Most likely the session ended: asking `me` redirects to the login page.
       onClosed: () => void session.refresh().catch(() => {})
     });
