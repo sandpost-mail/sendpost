@@ -21,6 +21,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/audit"
 	"github.com/sandpost-mail/sandpost/internal/auth"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/comments"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/delivery"
@@ -29,7 +30,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/messages"
 	"github.com/sandpost-mail/sandpost/internal/projects"
-	"github.com/sandpost-mail/sandpost/internal/store"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 	"github.com/sandpost-mail/sandpost/internal/tokens"
 	"github.com/sandpost-mail/sandpost/internal/users"
@@ -52,11 +53,8 @@ type app struct {
 
 func newApp(t *testing.T, opts ...func(*api.Deps)) *app {
 	t.Helper()
-	dsn := testutil.PostgresDSN(t)
+	dsn := testutil.MigratedDSN(t)
 	pool := testutil.PoolFor(t, dsn)
-	if _, err := store.MigrateUp(context.Background(), pool); err != nil {
-		t.Fatal(err)
-	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bus := events.NewBus(dsn, log)
 	bctx, cancel := context.WithCancel(context.Background())
@@ -68,19 +66,19 @@ func newApp(t *testing.T, opts ...func(*api.Deps)) *app {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authSvc, err := auth.NewService(pool, testSecretKey)
+	authSvc, err := auth.NewService(pool, secrets.MustDeriveKeys(testSecretKey).Session, secrets.MustDeriveKeys(testSecretKey).CSRF)
 	if err != nil {
 		t.Fatal(err)
 	}
-	toks := tokens.NewService(pool, testSecretKey)
+	toks := tokens.NewService(pool, secrets.MustDeriveKeys(testSecretKey).APIToken)
 	deps := api.Deps{
 		DB: pool, Authz: authz.New(pool), Auth: authSvc, Tokens: toks,
 		Users: users.NewService(pool), Groups: groups.NewService(pool), Audit: audit.NewReader(pool),
-		Signer:   authz.NewSigner(testSecretKey),
-		Projects: projects.New(pool), Credentials: credentials.New(pool, testSecretKey),
+		Signer:   authz.NewSigner(secrets.MustDeriveKeys(testSecretKey).SignedURL),
+		Projects: projects.New(pool), Credentials: credentials.New(pool, secrets.MustDeriveKeys(testSecretKey).SMTPCredential),
 		Messages: messages.New(pool), Bus: bus, Log: log,
 		Comments: comments.New(pool), Activity: activity.NewReader(pool),
-		Delivery: delivery.NewService(pool, testSecretKey, &delivery.SMTPRelay{}, delivery.NewRiverQueue(jobs)),
+		Delivery: delivery.NewService(pool, secrets.NewBox(secrets.MustDeriveKeys(testSecretKey).Transport), &delivery.SMTPRelay{}, delivery.NewRiverQueue(jobs)),
 		Info:     api.ServerInfo{SMTPPort: 1025, SMTPTLSMode: "off", Version: "test"},
 		UI:       http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ui")) }),
 	}
@@ -108,7 +106,7 @@ func (a *app) userToken(uid int64, scopes ...string) string {
 // projectToken issues a project API token and returns its secret.
 func (a *app) projectToken(pid int64, scopes ...string) string {
 	a.t.Helper()
-	issued, err := a.toks.CreateForProject(context.Background(), authz.Trusted(pid), "test", scopes)
+	issued, err := a.toks.CreateForProject(context.Background(), authztest.Scope(pid), "test", scopes)
 	if err != nil {
 		a.t.Fatal(err)
 	}

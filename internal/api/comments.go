@@ -12,7 +12,7 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request, c *call) {
 	if !ok {
 		return
 	}
-	cursor, limit, ok := auditParams(w, r)
+	cursor, limit, ok := pageParams(w, r)
 	if !ok {
 		return
 	}
@@ -47,7 +47,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request, c *call) 
 
 // listActivity serves GET .../activity for everyone who can read messages.
 func (s *server) listActivity(w http.ResponseWriter, r *http.Request, c *call) {
-	cursor, limit, ok := auditParams(w, r)
+	cursor, limit, ok := pageParams(w, r)
 	if !ok {
 		return
 	}

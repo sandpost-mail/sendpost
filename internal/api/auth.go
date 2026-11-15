@@ -2,14 +2,16 @@ package api
 
 import (
 	"errors"
-	"net"
+	"math"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sandpost-mail/sandpost/internal/auth"
 	"github.com/sandpost-mail/sandpost/internal/authz"
-	"github.com/sandpost-mail/sandpost/internal/smtpd"
+	"github.com/sandpost-mail/sandpost/internal/ratelimit"
 	"github.com/sandpost-mail/sandpost/internal/users"
 )
 
@@ -23,41 +25,90 @@ const (
 	maxConcurrentLogins = 4
 )
 
-// loginLimits throttles failed logins per source address and per account
-// name. Both use a sliding window, see smtpd.FailureLimiter. Behind a reverse
-// proxy every client shares the proxy address, so the per address limit is
-// deliberately generous.
+// loginLimits throttles failed logins per client address and per account
+// name, both with a sliding window (see ratelimit.Limiter).
+//
+// The account limit is strict: once an account used up its budget, even the
+// right password is refused until the window moves on. The address limit only
+// applies to failures: a blocked address still gets its password checked, a
+// correct one logs in and a wrong one is answered 429. Behind a reverse proxy
+// that is not listed in trusted, every client shares the proxy address, and a
+// strict address limit would let anyone lock every user out.
 type loginLimits struct {
-	ip, account *smtpd.FailureLimiter
+	ip, account *ratelimit.Limiter
+	trusted     []netip.Prefix
 }
 
-func newLoginLimits() *loginLimits {
+// newLoginLimits builds the limits. trusted lists the reverse proxies whose
+// X-Forwarded-For header is believed, see clientIP.
+func newLoginLimits(trusted ...netip.Prefix) *loginLimits {
 	return &loginLimits{
-		ip:      smtpd.NewFailureLimiter(maxLoginsPerIP, loginWindow),
-		account: smtpd.NewFailureLimiter(maxLoginsPerUser, loginWindow),
+		ip:      ratelimit.New(maxLoginsPerIP, loginWindow),
+		account: ratelimit.New(maxLoginsPerUser, loginWindow),
+		trusted: trusted,
 	}
 }
 
-func (l *loginLimits) blocked(ip, account string) bool {
-	return l.ip.Blocked(ip) || l.account.Blocked(account)
-}
-
-func (l *loginLimits) fail(ip, account string) {
-	l.ip.Fail(ip)
-	l.account.Fail(account)
-}
-
-func tooManyLogins(w http.ResponseWriter) {
-	w.Header().Set("Retry-After", "300")
+// tooManyLogins answers 429 with the time until limiter unblocks key.
+func tooManyLogins(w http.ResponseWriter, limiter *ratelimit.Limiter, key string) {
+	wait := limiter.RetryAfter(key)
+	if wait <= 0 {
+		wait = limiter.Window()
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
 	writeErrorCode(w, http.StatusTooManyRequests, "too_many_attempts", "too many failed logins, try again later")
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP returns the address of the client that sent r. When the peer is a
+// trusted proxy, X-Forwarded-For is walked from the right and the first hop
+// that is not itself a trusted proxy wins: hops to its left were written by
+// the client and can not be believed. Without trusted proxies the header is
+// ignored.
+func clientIP(r *http.Request, trusted []netip.Prefix) string {
+	peer, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
-	return host
+	addr := peer.Addr().Unmap()
+	if !isTrusted(addr, trusted) {
+		return addr.String()
+	}
+	hops := r.Header.Values("X-Forwarded-For")
+	for i := len(hops) - 1; i >= 0; i-- {
+		parts := strings.Split(hops[i], ",")
+		for j := len(parts) - 1; j >= 0; j-- {
+			hop, ok := parseHop(parts[j])
+			if !ok {
+				// Garbage in the chain: stop at the last address we trust.
+				return addr.String()
+			}
+			addr = hop
+			if !isTrusted(hop, trusted) {
+				return hop.String()
+			}
+		}
+	}
+	return addr.String()
+}
+
+func parseHop(s string) (netip.Addr, bool) {
+	s = strings.TrimSpace(s)
+	if a, err := netip.ParseAddr(s); err == nil {
+		return a.Unmap(), true
+	}
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return ap.Addr().Unmap(), true
+	}
+	return netip.Addr{}, false
+}
+
+func isTrusted(a netip.Addr, trusted []netip.Prefix) bool {
+	for _, p := range trusted {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) cookieName() string {
@@ -72,7 +123,9 @@ func (s *server) setSessionCookie(w http.ResponseWriter, value string, expires t
 	if value == "" {
 		maxAge = -1
 	}
-	http.SetCookie(w, &http.Cookie{
+	// Secure follows COOKIE_SECURE so plain HTTP local setups can log in;
+	// HttpOnly and SameSite=Strict are always set.
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is configurable (COOKIE_SECURE), see above
 		Name: s.cookieName(), Value: value, Path: "/", Expires: expires, MaxAge: maxAge,
 		HttpOnly: true, Secure: s.CookieSecure, SameSite: http.SameSiteStrictMode,
 	})
@@ -92,30 +145,37 @@ func (s *server) login(w http.ResponseWriter, r *http.Request, _ *call) {
 	if !decodeBody(w, r, &in) {
 		return
 	}
-	ip, account := clientIP(r), strings.ToLower(strings.TrimSpace(in.Email))
-	if s.logins.blocked(ip, account) {
-		tooManyLogins(w)
+	ipKey := ratelimit.Key(clientIP(r, s.logins.trusted))
+	account := strings.ToLower(strings.TrimSpace(in.Email))
+	// Reserving records the failure up front (released on success), so a
+	// burst of parallel guesses can not slip past the account limit.
+	accRes, ok := s.logins.account.Reserve(account)
+	if !ok {
+		tooManyLogins(w, s.logins.account, account)
 		return
 	}
-	// Wait for a slot, then check again: failures recorded by the attempts
-	// that held the slots meanwhile count. A burst of parallel guesses can
-	// therefore not slip past the limit.
+	ipRes, ipAllowed := s.logins.ip.Reserve(ipKey)
+	release := func() {
+		accRes.Release()
+		ipRes.Release()
+	}
 	select {
 	case s.loginSlots <- struct{}{}:
 		defer func() { <-s.loginSlots }()
 	case <-r.Context().Done():
-		return
-	}
-	if s.logins.blocked(ip, account) {
-		tooManyLogins(w)
+		release()
 		return
 	}
 	sess, err := s.Auth.Login(r.Context(), in.Email, in.Password)
 	if errors.Is(err, auth.ErrInvalidCredentials) {
-		s.logins.fail(ip, account)
+		if !ipAllowed {
+			tooManyLogins(w, s.logins.ip, ipKey)
+			return
+		}
 		writeErrorCode(w, http.StatusUnauthorized, "invalid_credentials", "invalid email or password")
 		return
 	}
+	release()
 	if err != nil {
 		s.fail(w, r, err)
 		return

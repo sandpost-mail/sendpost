@@ -28,14 +28,11 @@ func (s *server) listMessages(w http.ResponseWriter, r *http.Request, c *call) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	limit := 0
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if limit, err = strconv.Atoi(raw); err != nil || limit < 0 {
-			writeError(w, http.StatusBadRequest, "invalid limit")
-			return
-		}
+	cursor, limit, ok := pageParams(w, r)
+	if !ok {
+		return
 	}
-	page, err := s.Messages.List(r.Context(), c.scope, q, r.URL.Query().Get("cursor"), limit)
+	page, err := s.Messages.List(r.Context(), c.scope, q, cursor, limit)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -88,7 +85,7 @@ func (s *server) rawMessage(w http.ResponseWriter, r *http.Request, c *call) {
 	} else {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
-	_, _ = w.Write(raw)
+	_, _ = w.Write(raw) //nolint:gosec // G705: untrusted source served as text/plain or message/rfc822 with nosniff and the sandbox attachmentCSP
 }
 
 // previewURL mints a short lived signed URL for the sandboxed iframe. The
@@ -130,7 +127,7 @@ func (s *server) htmlMessage(w http.ResponseWriter, r *http.Request, c *call) {
 	if !ok {
 		return
 	}
-	html, err := s.Messages.HTML(r.Context(), c.scope, mid)
+	d, html, err := s.Messages.GetWithHTML(r.Context(), c.scope, mid)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -139,35 +136,17 @@ func (s *server) htmlMessage(w http.ResponseWriter, r *http.Request, c *call) {
 		writeError(w, http.StatusNotFound, "message has no HTML part")
 		return
 	}
-	d, err := s.Messages.Get(r.Context(), c.scope, mid)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", htmlCSP)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	_, _ = w.Write([]byte(`<base target="_blank">` + s.rewriteCIDs(html, c.scope, mid, d.Attachments)))
+	serveHTML(w, withBase(rewriteCIDs(html, d.Attachments, s.signedAttachmentURL(c.scope, mid))))
 }
 
-// rewriteCIDs points cid: references at attachment URLs carrying a fresh
-// signed grant, valid for the same short time as the preview itself.
-func (s *server) rewriteCIDs(html string, scope authz.Scope, mid int64, atts []messages.Attachment) string {
-	var pairs []string
-	for _, a := range atts {
-		if a.ContentID == "" {
-			continue
-		}
+// signedAttachmentURL points cid: references at attachment URLs carrying a
+// fresh signed grant, valid for the same short time as the preview itself.
+func (s *server) signedAttachmentURL(scope authz.Scope, mid int64) func(messages.Attachment) string {
+	return func(a messages.Attachment) string {
 		res := "attachment/" + strconv.Itoa(a.Ordinal)
 		exp, sig := s.Signer.Sign(scope, mid, res, authz.DefaultGrantTTL)
-		pairs = append(pairs, "cid:"+a.ContentID, signedURL(scope.ProjectID(), mid, res, exp, sig))
+		return signedURL(scope.ProjectID(), mid, res, exp, sig)
 	}
-	if len(pairs) == 0 {
-		return html
-	}
-	return strings.NewReplacer(pairs...).Replace(html)
 }
 
 func (s *server) attachment(w http.ResponseWriter, r *http.Request, c *call) {
@@ -189,14 +168,5 @@ func (s *server) attachment(w http.ResponseWriter, r *http.Request, c *call) {
 	if name == "" {
 		name = fmt.Sprintf("attachment-%d", a.Ordinal)
 	}
-	ct := a.ContentType
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", attachmentCSP)
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	_, _ = w.Write(content)
+	servePart(w, a.ContentType, name, false, content)
 }

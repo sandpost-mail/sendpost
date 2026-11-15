@@ -3,7 +3,6 @@ package api
 import (
 	"mime"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -48,17 +47,10 @@ func (s *server) compatMessage(w http.ResponseWriter, r *http.Request, c *compat
 		return
 	}
 	ctx := r.Context()
-	d, err := s.Messages.Get(ctx, c.scope, id)
+	d, htmlBody, err := s.Messages.GetWithHTML(ctx, c.scope, id)
 	if err != nil {
 		s.compatFail(w, r, err)
 		return
-	}
-	htmlBody := ""
-	if d.HasHTML {
-		if htmlBody, err = s.Messages.HTML(ctx, c.scope, id); err != nil {
-			s.compatFail(w, r, err)
-			return
-		}
 	}
 	var sums map[int]messages.Checksums
 	if len(d.Attachments) > 0 {
@@ -106,18 +98,12 @@ func (s *server) compatRaw(w http.ResponseWriter, r *http.Request, c *compatCall
 	if r.URL.Query().Get("dl") == "1" {
 		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": idString(id) + ".eml"}))
 	}
-	_, _ = w.Write(raw)
+	_, _ = w.Write(raw) //nolint:gosec // G705: untrusted source served as text/plain with nosniff and a sandbox CSP
 }
 
-// scriptableTypes are shown as downloads: served inline they could run script
-// on the Sandpost origin.
-var scriptableTypes = map[string]bool{
-	"text/html": true, "text/xml": true, "application/xhtml+xml": true,
-	"image/svg+xml": true, "application/xml": true, "text/xsl": true,
-}
-
-// compatPart is GET /message/{ID}/part/{PartID}. Parts that a browser would
-// execute are served as downloads, the same rule as Mailpit.
+// compatPart is GET /message/{ID}/part/{PartID}. Only types on the inline
+// allowlist are shown in the browser, everything else is a download (see
+// servePart, shared with the native API).
 func (s *server) compatPart(w http.ResponseWriter, r *http.Request, c *compatCall) {
 	id, ok := s.compatMessageID(w, r, c, r.PathValue("ID"))
 	if !ok {
@@ -137,22 +123,7 @@ func (s *server) compatPart(w http.ResponseWriter, r *http.Request, c *compatCal
 	if name == "" {
 		name = a.ContentID
 	}
-	ct, disposition := a.ContentType, "inline"
-	mediaType, _, _ := strings.Cut(strings.ToLower(ct), ";")
-	if scriptableTypes[strings.TrimSpace(mediaType)] {
-		ct, disposition = "application/octet-stream", "attachment"
-	}
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	w.Header().Set("Content-Type", ct)
-	if name != "" {
-		w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
-	}
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", attachmentCSP)
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	_, _ = w.Write(content)
+	servePart(w, a.ContentType, name, true, content)
 }
 
 // compatView serves GET /view/{ID}.html and /view/{ID}.txt, the HTML or text
@@ -174,22 +145,18 @@ func (s *server) compatView(w http.ResponseWriter, r *http.Request, c *compatCal
 		return
 	}
 	ctx := r.Context()
-	d, err := s.Messages.Get(ctx, c.scope, id)
+	d, htmlBody, err := s.Messages.GetWithHTML(ctx, c.scope, id)
 	if err != nil {
 		s.compatFail(w, r, err)
 		return
 	}
 	body, ct := d.Text, "text/plain; charset=utf-8"
 	if isHTML {
-		if !d.HasHTML {
+		if htmlBody == "" {
 			compatText(w, http.StatusNotFound, "This message does not contain a HTML part")
 			return
 		}
-		if body, err = s.Messages.HTML(ctx, c.scope, id); err != nil {
-			s.compatFail(w, r, err)
-			return
-		}
-		body, ct = linkInlineImages(body, d, c.root+CompatPrefix), "text/html; charset=utf-8"
+		body, ct = linkInlineImages(htmlBody, d, c.root+CompatPrefix), "text/html; charset=utf-8"
 		w.Header().Set("Content-Security-Policy", htmlCSP)
 	} else {
 		w.Header().Set("Content-Security-Policy", attachmentCSP)
@@ -202,18 +169,12 @@ func (s *server) compatView(w http.ResponseWriter, r *http.Request, c *compatCal
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
+	_, _ = w.Write([]byte(body)) //nolint:gosec // G705: untrusted mail body served with nosniff and a sandbox CSP (htmlCSP or attachmentCSP)
 }
 
 // linkInlineImages points cid: references at the part endpoint of this API.
 func linkInlineImages(html string, d messages.Detail, apiBase string) string {
-	for _, a := range d.Attachments {
-		if a.ContentID == "" {
-			continue
-		}
-		re := regexp.MustCompile(`(?i)cid:` + regexp.QuoteMeta(a.ContentID))
-		target := apiBase + "/message/" + idString(d.ID) + "/part/" + strconv.Itoa(a.Ordinal)
-		html = re.ReplaceAllLiteralString(html, target)
-	}
-	return html
+	return rewriteCIDs(html, d.Attachments, func(a messages.Attachment) string {
+		return apiBase + "/message/" + idString(d.ID) + "/part/" + strconv.Itoa(a.Ordinal)
+	})
 }

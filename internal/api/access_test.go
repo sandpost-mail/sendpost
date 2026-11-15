@@ -10,8 +10,10 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/api"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/projects"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
 
@@ -75,16 +77,16 @@ func (w *world) tenant(slug string) tenant {
 	t, a := w.a.t, w.a
 	ctx := context.Background()
 	p := a.project(slug)
-	cred, err := credentials.New(a.pool, testSecretKey).Create(ctx, authz.Trusted(p.ID), "c")
+	cred, err := credentials.New(a.pool, secrets.MustDeriveKeys(testSecretKey).SMTPCredential).Create(ctx, authztest.Scope(p.ID), "c")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rule, err := projects.New(a.pool).CreateTagRule(ctx, authz.Trusted(p.ID),
+	rule, err := projects.New(a.pool).CreateTagRule(ctx, authztest.Scope(p.ID),
 		projects.TagRuleInput{Kind: "recipient", Pattern: "*", Tag: "t"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := a.toks.CreateForProject(ctx, authz.Trusted(p.ID), "t", []string{"read"})
+	tok, err := a.toks.CreateForProject(ctx, authztest.Scope(p.ID), "t", []string{"read"})
 	if err != nil {
 		t.Fatal(err)
 	}

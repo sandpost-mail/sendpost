@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/api"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/messages"
 	"github.com/sandpost-mail/sandpost/internal/search"
 )
@@ -44,8 +45,8 @@ func TestCompatUnauthenticatedRoutesAreRejected(t *testing.T) {
 				}
 				// A browser session must not work here, even with its CSRF header.
 				req, _ := http.NewRequestWithContext(t.Context(), rt.Method, w.a.srv.URL+path, nil)
-				req.AddCookie(&http.Cookie{Name: "sandpost_session", Value: "x"})
-				req.AddCookie(&http.Cookie{Name: "__Host-sandpost_session", Value: "x"})
+				req.AddCookie(&http.Cookie{Name: "sandpost_session", Value: "x"})        //nolint:gosec // G124: request cookie in a test, attributes do not apply
+				req.AddCookie(&http.Cookie{Name: "__Host-sandpost_session", Value: "x"}) //nolint:gosec // G124: request cookie in a test, attributes do not apply
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
 					t.Fatal(err)
@@ -153,7 +154,7 @@ type snapshot struct {
 func takeSnapshot(t *testing.T, w *world, tn tenant) snapshot {
 	t.Helper()
 	repo := messages.New(w.a.pool)
-	scope := authz.Trusted(tn.pid)
+	scope := authztest.Scope(tn.pid)
 	counts, err := repo.CountFiltered(context.Background(), scope, search.Filter{})
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +241,7 @@ func TestCompatCrossTenantLeakage(t *testing.T) {
 
 	t.Run("tags of another project can not be renamed or deleted", func(t *testing.T) {
 		repo := messages.New(w.a.pool)
-		if err := repo.ReplaceTags(context.Background(), authz.Trusted(w.p2.pid), []int64{w.p2.mid}, []string{"only-two"}); err != nil {
+		if err := repo.ReplaceTags(context.Background(), authztest.Scope(w.p2.pid), []int64{w.p2.mid}, []string{"only-two"}); err != nil {
 			t.Fatal(err)
 		}
 		for _, a := range []struct{ method, path, body string }{
@@ -251,7 +252,7 @@ func TestCompatCrossTenantLeakage(t *testing.T) {
 				t.Errorf("%s %s: status %d: %s", a.method, a.path, r.StatusCode, r.body)
 			}
 		}
-		tags, err := repo.TagCounts(context.Background(), authz.Trusted(w.p2.pid))
+		tags, err := repo.TagCounts(context.Background(), authztest.Scope(w.p2.pid))
 		if err != nil || len(tags) != 1 || tags[0].Name != "only-two" {
 			t.Errorf("project two tags: %v %v", tags, err)
 		}

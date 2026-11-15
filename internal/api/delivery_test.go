@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -118,6 +119,25 @@ func TestOnlyOwnersManageDelivery(t *testing.T) {
 				t.Errorf("%s %s %s: %d %s", name, r.method, r.path, resp.StatusCode, body)
 			}
 		}
+	}
+}
+
+// TestTransportTestIsRateLimited: the connection test reaches arbitrary
+// hosts, so a project gets only a few per minute.
+func TestTransportTestIsRateLimited(t *testing.T) {
+	w := newWorld(t)
+	path := pp(w.p1.pid, "/transport/test")
+	for i := range 5 {
+		if resp, data := w.a.doAs(w.owner1, http.MethodPost, path, nil); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("test %d: %d %s", i, resp.StatusCode, data)
+		}
+	}
+	resp, data := w.a.doAs(w.owner1, http.MethodPost, path, nil)
+	if resp.StatusCode != http.StatusTooManyRequests || !strings.Contains(string(data), "too_many_attempts") {
+		t.Fatalf("sixth test: %d %s", resp.StatusCode, data)
+	}
+	if ra, err := strconv.Atoi(resp.Header.Get("Retry-After")); err != nil || ra < 1 || ra > 60 {
+		t.Errorf("Retry-After %q", resp.Header.Get("Retry-After"))
 	}
 }
 

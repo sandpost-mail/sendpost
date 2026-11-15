@@ -113,8 +113,8 @@ func TestCommentContentIsPlainTextAndBounded(t *testing.T) {
 	}
 	// The limit counts characters, not bytes.
 	w.a.mustJSONAs(w.alice, http.MethodPost, path, map[string]string{"body": strings.Repeat("é", comments.MaxBodyRunes)}, http.StatusCreated, nil)
-	// A big body is refused before parsing.
-	w.a.mustJSONAs(w.alice, http.MethodPost, path, map[string]string{"body": strings.Repeat("a", 70<<10)}, http.StatusBadRequest, nil)
+	// A big body is refused before parsing, as too large.
+	w.a.mustJSONAs(w.alice, http.MethodPost, path, map[string]string{"body": strings.Repeat("a", 70<<10)}, http.StatusRequestEntityTooLarge, nil)
 }
 
 func TestCommentsDoNotCrossProjects(t *testing.T) {

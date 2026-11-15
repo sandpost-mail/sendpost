@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/tokens"
 )
 
 type tokenInput struct {
@@ -12,10 +13,16 @@ type tokenInput struct {
 }
 
 // withinCeiling rejects a token request that asks for more than the calling
-// principal itself holds, so a read token can not mint a write token.
+// principal itself holds, so a read token can not mint a write token. Scopes
+// that do not parse are refused here too: the check fails closed on its own
+// instead of relying on later validation.
 func (s *server) withinCeiling(w http.ResponseWriter, r *http.Request, p authz.Principal, scopes []string) bool {
 	want, ok := authz.CeilingOf(scopes)
-	if ok && want > p.Ceiling {
+	if !ok {
+		s.fail(w, r, tokens.ErrBadInput)
+		return false
+	}
+	if want > p.Ceiling {
 		s.fail(w, r, authz.ErrForbidden)
 		return false
 	}

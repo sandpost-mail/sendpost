@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -296,16 +298,24 @@ func TestParallelGuessesStayWithinTheLimit(t *testing.T) {
 	a := newApp(t)
 	testutil.UserWithPassword(t, a.pool, "target@example.test", userPassword, false, false)
 	const burst = 40
-	codes := make(chan int, burst)
+	type result struct {
+		code int
+		err  error
+	}
+	results := make(chan result, burst)
 	for range burst {
-		go func() {
-			resp, _ := a.browser().login("target@example.test", "wrong wrong wrong")
-			codes <- resp.StatusCode
+		go func() { // no t.Fatal off the test goroutine: report through the channel
+			code, err := tryLogin(t.Context(), a, "target@example.test", "wrong wrong wrong")
+			results <- result{code, err}
 		}()
 	}
 	counts := map[int]int{}
 	for range burst {
-		counts[<-codes]++
+		res := <-results
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		counts[res.code]++
 	}
 	// The account allows 10 failures, and at most 4 attempts hold a slot at once.
 	if counts[http.StatusUnauthorized] > 14 || counts[http.StatusTooManyRequests] < burst-14 {
@@ -317,6 +327,26 @@ func TestParallelGuessesStayWithinTheLimit(t *testing.T) {
 	// The right password is refused while the account is limited.
 	resp, data := a.browser().login("target@example.test", userPassword)
 	status(t, resp, data, http.StatusTooManyRequests)
+}
+
+// TestAddressLimitOnlyStopsFailures: clients behind one address (a proxy that
+// is not trusted) must not be able to lock each other out.
+func TestAddressLimitOnlyStopsFailures(t *testing.T) {
+	a := newApp(t)
+	testutil.UserWithPassword(t, a.pool, "real@example.test", userPassword, false, false)
+	b := a.browser()
+	// 20 failures from one address, spread so no account reaches its own limit.
+	for i := range 20 {
+		resp, data := b.login(fmt.Sprintf("spray%d@example.test", i%4), "wrong wrong wrong")
+		status(t, resp, data, http.StatusUnauthorized)
+	}
+	resp, data := b.login("other@example.test", "wrong wrong wrong")
+	status(t, resp, data, http.StatusTooManyRequests)
+	if ra, err := strconv.Atoi(resp.Header.Get("Retry-After")); err != nil || ra <= 0 || ra > 300 {
+		t.Errorf("Retry-After = %q, want seconds within the window", resp.Header.Get("Retry-After"))
+	}
+	resp, data = b.login("real@example.test", userPassword)
+	status(t, resp, data, http.StatusOK)
 }
 
 func TestSecureCookieMode(t *testing.T) {
