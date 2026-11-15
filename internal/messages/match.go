@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	pagination "github.com/sandpost-mail/sandpost/internal/page"
 	"github.com/sandpost-mail/sandpost/internal/search"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
@@ -30,6 +31,9 @@ type MatchQuery struct {
 	AfterID int64
 	// Limit caps the result, DefaultLimit when 0, MaxLimit at most.
 	Limit int
+	// NewestFirst orders by id descending, so the first Limit rows are the
+	// latest matches. The default is oldest first.
+	NewestFirst bool
 }
 
 // ValidateRunID checks a run id: 1 to MaxRunIDLength bytes of printable text.
@@ -49,25 +53,21 @@ func ValidateRunID(run string) error {
 	return nil
 }
 
-// Match returns the project's messages matching q, oldest first. It never
+// Match returns the project's messages matching q, oldest first unless
+// q.NewestFirst. It never
 // returns a row of another project.
 func (r *Repository) Match(ctx context.Context, scope authz.Scope, q MatchQuery) ([]Summary, error) {
 	if err := ValidateRunID(q.Run); err != nil {
 		return nil, err
 	}
-	limit := q.Limit
-	switch {
-	case limit <= 0:
-		limit = DefaultLimit
-	case limit > MaxLimit:
-		limit = MaxLimit
-	}
+	limit := pagination.Clamp(q.Limit, DefaultLimit, MaxLimit)
 	lp := listParams(scope.ProjectID(), q.Query, limit)
 	rows, err := r.q.MatchMessages(ctx, sqlcgen.MatchMessagesParams{
 		ProjectID: lp.ProjectID, AfterID: max(q.AfterID, 0),
 		FromLike: lp.FromLike, ToLike: lp.ToLike, SubjectLike: lp.SubjectLike, Tag: lp.Tag,
 		Run: text(q.Run), ReceivedAfter: lp.ReceivedAfter, ReceivedBefore: lp.ReceivedBefore,
 		Body: lp.Body, Free: lp.Free, FreeLike: lp.FreeLike, PageSize: lp.PageSize,
+		NewestFirst: q.NewestFirst,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("match messages: %w", err)

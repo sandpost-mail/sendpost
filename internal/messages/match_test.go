@@ -3,11 +3,12 @@ package messages_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/messages"
 	"github.com/sandpost-mail/sandpost/internal/search"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
@@ -21,17 +22,7 @@ func ids(items []messages.Summary) []int64 {
 	return out
 }
 
-func equalIDs(a, b []int64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
+func equalIDs(a, b []int64) bool { return slices.Equal(a, b) }
 
 func TestMatchRunFilterAndOrder(t *testing.T) {
 	e := newEnv(t)
@@ -41,7 +32,7 @@ func TestMatchRunFilterAndOrder(t *testing.T) {
 	b := e.add(t, e.pid, now.Add(time.Second), "a@x.test", "u@x.test", "reset", "hi", "x-run-id: run-2")
 	c := e.add(t, e.pid, now.Add(2*time.Second), "a@x.test", "u@x.test", "welcome", "hi", "X-Run-Id: run-1")
 	foreign := e.add(t, other, now, "a@x.test", "u@x.test", "welcome", "hi", "X-Run-Id: run-1")
-	scope := authz.Trusted(e.pid)
+	scope := authztest.Scope(e.pid)
 	ctx := context.Background()
 
 	got, err := e.repo.Match(ctx, scope, messages.MatchQuery{})
@@ -65,7 +56,7 @@ func TestMatchRunFilterAndOrder(t *testing.T) {
 	if !equalIDs(ids(got), []int64{a}) {
 		t.Fatalf("query + limit: %v", ids(got))
 	}
-	got, _ = e.repo.Match(ctx, authz.Trusted(other), messages.MatchQuery{Run: "run-1"})
+	got, _ = e.repo.Match(ctx, authztest.Scope(other), messages.MatchQuery{Run: "run-1"})
 	if !equalIDs(ids(got), []int64{foreign}) {
 		t.Fatalf("other project sees only its own: %v", ids(got))
 	}
@@ -84,7 +75,7 @@ func TestMatchRunFilterAcceptsTag(t *testing.T) {
 	}
 	id := e.add(t, e.pid, time.Now(), "a@x.test", "u@x.test", "s", "b", "X-Build: b77")
 	e.add(t, e.pid, time.Now(), "a@x.test", "u@x.test", "s", "b", "X-Build: b78")
-	got, err := e.repo.Match(ctx, authz.Trusted(e.pid), messages.MatchQuery{Run: "b77"})
+	got, err := e.repo.Match(ctx, authztest.Scope(e.pid), messages.MatchQuery{Run: "b77"})
 	if err != nil || !equalIDs(ids(got), []int64{id}) {
 		t.Fatalf("tag as run: %v %v", ids(got), err)
 	}
@@ -97,7 +88,7 @@ func TestMatchRunFilterAcceptsTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := e.add(t, e.pid, time.Now(), "a@x.test", "u@x.test", "s", "b", "X-Job: j5")
-	got, _ = e.repo.Match(ctx, authz.Trusted(e.pid), messages.MatchQuery{Run: "j5"})
+	got, _ = e.repo.Match(ctx, authztest.Scope(e.pid), messages.MatchQuery{Run: "j5"})
 	if !equalIDs(ids(got), []int64{job}) {
 		t.Fatalf("run:<id> tag: %v", ids(got))
 	}
@@ -115,7 +106,7 @@ func TestValidateRunID(t *testing.T) {
 		}
 	}
 	e := newEnv(t)
-	if _, err := e.repo.Match(context.Background(), authz.Trusted(e.pid), messages.MatchQuery{Run: "a\nb"}); !errors.Is(err, messages.ErrInvalidRun) {
+	if _, err := e.repo.Match(context.Background(), authztest.Scope(e.pid), messages.MatchQuery{Run: "a\nb"}); !errors.Is(err, messages.ErrInvalidRun) {
 		t.Errorf("Match must validate: %v", err)
 	}
 }

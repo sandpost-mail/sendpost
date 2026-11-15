@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -86,6 +88,12 @@ type Extraction struct {
 	Codes     []Code   `json:"codes"`
 }
 
+// Orders of the wait answer.
+const (
+	OrderAsc  = "asc"  // oldest first, the server default
+	OrderDesc = "desc" // newest first
+)
+
 // WaitParams are the query parameters of the wait route. Count is required
 // (1 to 50), the other zero values are omitted from the request.
 type WaitParams struct {
@@ -94,6 +102,8 @@ type WaitParams struct {
 	AfterID int64
 	Count   int
 	Timeout time.Duration
+	// Order is OrderAsc or OrderDesc; empty leaves the server default (asc).
+	Order string
 }
 
 // ExtractParams are the optional filters of the extract route.
@@ -109,6 +119,11 @@ type Client struct {
 	token   string
 	// HTTP can be replaced in tests. Its Timeout must stay zero, deadlines are per call.
 	HTTP *http.Client
+	// Warnings receives advice that does not stop the call, such as the token
+	// travelling over plain http. Nil discards it.
+	Warnings io.Writer
+
+	warnOnce sync.Once
 }
 
 // New validates the server address, the numeric project id and the token.
@@ -162,6 +177,8 @@ func (p WaitParams) Validate() error {
 		return fmt.Errorf("%w: timeout must be between 0 and %s", ErrInvalid, MaxTimeout)
 	case p.AfterID < 0:
 		return fmt.Errorf("%w: after-id must not be negative", ErrInvalid)
+	case p.Order != "" && p.Order != OrderAsc && p.Order != OrderDesc:
+		return fmt.Errorf("%w: order must be %s or %s", ErrInvalid, OrderAsc, OrderDesc)
 	}
 	if p.Run != "" {
 		return ValidateRunID(p.Run)
@@ -186,6 +203,9 @@ func (c *Client) Wait(ctx context.Context, p WaitParams) (WaitResult, []byte, er
 	}
 	if p.AfterID > 0 {
 		q.Set("after_id", strconv.FormatInt(p.AfterID, 10))
+	}
+	if p.Order != "" {
+		q.Set("order", p.Order)
 	}
 	q.Set("count", strconv.Itoa(p.Count))
 	// Round up so a sub second timeout still waits.
@@ -227,7 +247,30 @@ func (c *Client) Extract(ctx context.Context, messageID int64, p ExtractParams) 
 	return ex, raw, nil
 }
 
+// warnCleartext tells once, on Warnings, that the token is about to cross
+// the network unencrypted. It does not refuse: CI services commonly reach
+// Sandpost over plain http inside a Docker or cluster network.
+func (c *Client) warnCleartext() {
+	if c.Warnings == nil || c.base.Scheme != "http" || isLoopback(c.base.Hostname()) {
+		return
+	}
+	c.warnOnce.Do(func() {
+		_, _ = fmt.Fprintf(c.Warnings,
+			"warning: sending the API token over plain http to %s; use https unless this network is private\n",
+			c.base.Host)
+	})
+}
+
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
+}
+
 func (c *Client) get(ctx context.Context, route string, q url.Values) ([]byte, error) {
+	c.warnCleartext()
 	u := c.base.JoinPath(apiPrefix, strconv.FormatInt(c.project, 10), route)
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -250,9 +293,12 @@ func (c *Client) get(ctx context.Context, route string, q url.Values) ([]byte, e
 		_ = json.Unmarshal(b, &body)
 		return nil, &APIError{Status: resp.StatusCode, Message: body.Error}
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("read answer: %w", err)
+	}
+	if len(raw) > maxBody {
+		return nil, fmt.Errorf("%s answer too large: response larger than %d bytes", route, maxBody)
 	}
 	return raw, nil
 }

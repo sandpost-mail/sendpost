@@ -3,10 +3,12 @@ package ciclient
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -105,6 +107,7 @@ func TestWaitParamValidation(t *testing.T) {
 		{"run too long", WaitParams{Count: 1, Run: strings.Repeat("x", 101)}},
 		{"run padded", WaitParams{Count: 1, Run: " x"}},
 		{"run invalid utf8", WaitParams{Count: 1, Run: "\xff"}},
+		{"unknown order", WaitParams{Count: 1, Order: "newest"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,7 +230,7 @@ func TestTransportErrorDoesNotLeakToken(t *testing.T) {
 }
 
 func TestContextCancel(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	c := newTestClient(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if _, _, err := c.Wait(ctx, WaitParams{Count: 1, Timeout: 30 * time.Second}); err == nil {
@@ -237,14 +240,37 @@ func TestContextCancel(t *testing.T) {
 
 func TestClientDeadlineExceedsServerTimeout(t *testing.T) {
 	// The server answers after 1.2s although the poll was asked for 0s: a
-	// client deadline equal to the timeout alone would have cut it.
-	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(1200 * time.Millisecond)
-		_, _ = w.Write([]byte(`{"messages":[],"timed_out":true}`))
+	// client deadline equal to the timeout alone would have cut it. The
+	// bubble's fake clock makes the delay instant and the deadline exact.
+	synctest.Test(t, func(t *testing.T) {
+		c, err := New("http://127.0.0.1:1", "7", "spp_secret")
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		c.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			deadline, ok := r.Context().Deadline()
+			if want := start.Add(clientMargin); !ok || !deadline.Equal(want) {
+				t.Errorf("request deadline = %v (set %v), want %v", deadline, ok, want)
+			}
+			select {
+			case <-time.After(1200 * time.Millisecond):
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK, Request: r, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"messages":[],"timed_out":true}`)),
+			}, nil
+		})}
+		res, _, err := c.Wait(context.Background(), WaitParams{Count: 1})
+		if err != nil || !res.TimedOut {
+			t.Fatalf("Wait = %+v, %v; want a timed out answer", res, err)
+		}
+		if got := time.Since(start); got != 1200*time.Millisecond {
+			t.Errorf("Wait took %v of fake time, want 1.2s", got)
+		}
 	})
-	if _, _, err := c.Wait(context.Background(), WaitParams{Count: 1}); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestValidRunID(t *testing.T) {
@@ -259,3 +285,83 @@ func TestValidRunID(t *testing.T) {
 		}
 	}
 }
+
+func TestWaitSendsOrder(t *testing.T) {
+	tests := []struct {
+		order string
+		want  string
+	}{
+		{"", ""},
+		{OrderAsc, "asc"},
+		{OrderDesc, "desc"},
+	}
+	for _, tt := range tests {
+		t.Run("order="+tt.order, func(t *testing.T) {
+			got := make(chan string, 1)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				got <- r.URL.Query().Get("order")
+				_, _ = w.Write([]byte(`{"messages":[],"timed_out":true}`))
+			})
+			if _, _, err := c.Wait(context.Background(), WaitParams{Count: 1, Order: tt.order}); err != nil {
+				t.Fatal(err)
+			}
+			if o := <-got; o != tt.want {
+				t.Fatalf("order=%q, want %q", o, tt.want)
+			}
+		})
+	}
+}
+
+func TestOversizedAnswerIsReportedAsTooLarge(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"messages":[],"pad":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", maxBody)))
+		_, _ = w.Write([]byte(`"}`))
+	})
+	_, _, err := c.Wait(context.Background(), WaitParams{Count: 1})
+	if err == nil || !strings.Contains(err.Error(), "too large") || strings.Contains(err.Error(), "decode") {
+		t.Fatalf("err = %v, want a too large error", err)
+	}
+}
+
+func TestCleartextTokenWarning(t *testing.T) {
+	tests := []struct {
+		server   string
+		wantWarn bool
+	}{
+		{"http://sandpost.ci.internal:8080", true},
+		{"http://10.0.0.5", true},
+		{"http://127.0.0.1:8080", false},
+		{"http://[::1]:8080", false},
+		{"http://localhost:8080", false},
+		{"https://sandpost.example", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.server, func(t *testing.T) {
+			c, err := New(tt.server, "1", "spp_secret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var warn strings.Builder
+			c.Warnings = &warn
+			// Every request fails fast: the transport refuses before dialing.
+			c.HTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("offline")
+			})}
+			for range 2 {
+				_, _, _ = c.Wait(context.Background(), WaitParams{Count: 1})
+			}
+			got := warn.String()
+			if tt.wantWarn != (got != "") {
+				t.Fatalf("warning %q, want one: %v", got, tt.wantWarn)
+			}
+			if tt.wantWarn && (strings.Count(got, "warning:") != 1 || strings.Contains(got, "spp_secret")) {
+				t.Fatalf("warning must be printed once, without the token: %q", got)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
