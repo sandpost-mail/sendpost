@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/auth"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
@@ -20,7 +21,7 @@ const (
 
 func TestLogin(t *testing.T) {
 	pool := testutil.Pool(t)
-	svc, err := auth.NewService(pool, secretKey)
+	svc, err := auth.NewService(pool, secrets.MustDeriveKeys(secretKey).Session, secrets.MustDeriveKeys(secretKey).CSRF)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +38,8 @@ func TestLogin(t *testing.T) {
 	}{
 		{"valid", "dev@example.test", password, nil},
 		{"email ignores case", "DEV@Example.Test", password, nil},
+		{"email is trimmed like at creation", "  dev@example.test ", password, nil},
+		{"display name form", "Dev <dev@example.test>", password, auth.ErrInvalidCredentials},
 		{"wrong password", "dev@example.test", "not the password!!", auth.ErrInvalidCredentials},
 		{"unknown user", "ghost@example.test", password, auth.ErrInvalidCredentials},
 		{"disabled user", "off@example.test", password, auth.ErrInvalidCredentials},
@@ -65,7 +68,7 @@ func TestLogin(t *testing.T) {
 
 func TestSessionLifecycle(t *testing.T) {
 	pool := testutil.Pool(t)
-	svc, err := auth.NewService(pool, secretKey)
+	svc, err := auth.NewService(pool, secrets.MustDeriveKeys(secretKey).Session, secrets.MustDeriveKeys(secretKey).CSRF)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +123,8 @@ func TestSessionLifecycle(t *testing.T) {
 
 func TestKeysAreDerivedFromTheSecret(t *testing.T) {
 	pool := testutil.Pool(t)
-	a, _ := auth.NewService(pool, secretKey)
-	b, _ := auth.NewService(pool, "fedcba9876543210fedcba9876543210")
+	a, _ := auth.NewService(pool, secrets.MustDeriveKeys(secretKey).Session, secrets.MustDeriveKeys(secretKey).CSRF)
+	b, _ := auth.NewService(pool, secrets.MustDeriveKeys("fedcba9876543210fedcba9876543210").Session, secrets.MustDeriveKeys("fedcba9876543210fedcba9876543210").CSRF)
 	testutil.UserWithPassword(t, pool, "dev@example.test", password, false, false)
 	sess, err := a.Login(context.Background(), "dev@example.test", password)
 	if err != nil {
@@ -134,12 +137,49 @@ func TestKeysAreDerivedFromTheSecret(t *testing.T) {
 
 func TestDatabaseFailureIsNotAnAuthenticationFailure(t *testing.T) {
 	pool := testutil.Pool(t)
-	svc, _ := auth.NewService(pool, secretKey)
+	svc, _ := auth.NewService(pool, secrets.MustDeriveKeys(secretKey).Session, secrets.MustDeriveKeys(secretKey).CSRF)
 	pool.Close()
 	if _, err := svc.Login(context.Background(), "a@example.test", password); err == nil || errors.Is(err, auth.ErrInvalidCredentials) {
 		t.Errorf("login on a closed pool: %v", err)
 	}
 	if _, err := svc.Authenticate(context.Background(), "token"); err == nil || errors.Is(err, auth.ErrNoSession) {
 		t.Errorf("authenticate on a closed pool: %v", err)
+	}
+}
+
+func TestSessionExpiry(t *testing.T) {
+	pool := testutil.Pool(t)
+	svc, err := auth.NewService(pool, secrets.MustDeriveKeys(secretKey).Session, secrets.MustDeriveKeys(secretKey).CSRF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	testutil.UserWithPassword(t, pool, "dev@example.test", password, false, false)
+	now := time.Now().Truncate(time.Microsecond) // Postgres precision
+	auth.SetClock(svc, func() time.Time { return now })
+	sess, err := svc.Login(ctx, "dev@example.test", password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sess.ExpiresAt.Equal(now.Add(auth.SessionTTL)) {
+		t.Errorf("expiry %v, want %v", sess.ExpiresAt, now.Add(auth.SessionTTL))
+	}
+
+	now = now.Add(auth.SessionTTL - time.Second)
+	if _, err := svc.Authenticate(ctx, sess.Token); err != nil {
+		t.Errorf("a session must live for SessionTTL: %v", err)
+	}
+	now = now.Add(time.Second)
+	if _, err := svc.Authenticate(ctx, sess.Token); !errors.Is(err, auth.ErrNoSession) {
+		t.Errorf("an expired session authenticated: %v", err)
+	}
+
+	// The next login sweeps expired sessions.
+	if _, err := svc.Login(ctx, "dev@example.test", password); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM sessions").Scan(&n); err != nil || n != 1 {
+		t.Errorf("sessions after sweep: %d %v", n, err)
 	}
 }

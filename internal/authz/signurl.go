@@ -1,16 +1,18 @@
 package authz
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 )
 
 const (
-	signKeyContext = "sandpost/signed-url/v1"
 	// DefaultGrantTTL is how long a signed preview URL stays valid.
 	DefaultGrantTTL = 5 * time.Minute
 	maxGrantTTL     = time.Hour
@@ -30,15 +32,13 @@ type Signer struct {
 	now func() time.Time
 }
 
-// NewSigner derives a dedicated key from the instance SECRET_KEY.
-func NewSigner(secretKey string) *Signer {
-	return newSigner(secretKey, time.Now)
+// NewSigner returns a Signer keyed by key (see secrets.DeriveKeys).
+func NewSigner(key secrets.SignedURLKey) *Signer {
+	return newSigner(key, time.Now)
 }
 
-func newSigner(secretKey string, now func() time.Time) *Signer {
-	mac := hmac.New(sha256.New, []byte(secretKey))
-	mac.Write([]byte(signKeyContext))
-	return &Signer{key: mac.Sum(nil), now: now}
+func newSigner(key secrets.SignedURLKey, now func() time.Time) *Signer {
+	return &Signer{key: bytes.Clone(key), now: now}
 }
 
 // Sign returns the expiry (unix seconds) and signature for a resource, for

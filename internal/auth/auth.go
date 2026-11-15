@@ -7,6 +7,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -20,16 +21,14 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/passwords"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 	"github.com/sandpost-mail/sandpost/internal/users"
 )
 
 const (
 	// SessionTTL is the absolute lifetime of a session.
-	SessionTTL     = 24 * time.Hour
-	sessionKeyCtx  = "sandpost/session/v1"
-	csrfKeyCtx     = "sandpost/csrf/v1"
-	maxEmailLength = 254
+	SessionTTL = 24 * time.Hour
 )
 
 // ErrInvalidCredentials is returned for an unknown user, a wrong password and
@@ -59,21 +58,25 @@ type Service struct {
 	dummyHash string
 }
 
-// NewService returns a Service. Dedicated keys are derived from SECRET_KEY.
-func NewService(db sqlcgen.DBTX, secretKey string) (*Service, error) {
+// NewService returns a Service. sessionKey hashes session cookies and csrfKey
+// derives CSRF tokens (see secrets.DeriveKeys).
+func NewService(db sqlcgen.DBTX, sessionKey secrets.SessionKey, csrfKey secrets.CSRFKey) (*Service, error) {
 	dummy, err := passwords.Hash("not-a-real-password")
 	if err != nil {
 		return nil, fmt.Errorf("dummy hash: %w", err)
 	}
 	return &Service{
-		q: sqlcgen.New(db), sessionKey: derive(secretKey, sessionKeyCtx), csrfKey: derive(secretKey, csrfKeyCtx),
+		q: sqlcgen.New(db), sessionKey: bytes.Clone(sessionKey), csrfKey: bytes.Clone(csrfKey),
 		now: time.Now, dummyHash: dummy,
 	}, nil
 }
 
-// Login verifies the password and starts a session.
+// Login verifies the password and starts a session. The email goes through
+// users.NormalizeEmail, the rule accounts are created with, and is matched
+// ignoring case.
 func (s *Service) Login(ctx context.Context, email, password string) (Session, error) {
-	if len(email) > maxEmailLength || len(password) > 1024 {
+	email, err := users.NormalizeEmail(email)
+	if err != nil || len(password) > 1024 {
 		return Session{}, ErrInvalidCredentials
 	}
 	row, err := s.q.GetUserForLogin(ctx, email)
@@ -103,7 +106,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (Session, e
 	if err := s.q.CreateSession(ctx, sqlcgen.CreateSessionParams{ID: id, UserID: row.ID, ExpiresAt: expires}); err != nil {
 		return Session{}, fmt.Errorf("create session: %w", err)
 	}
-	_, _ = s.q.DeleteExpiredSessions(ctx) // best effort housekeeping
+	_, _ = s.q.DeleteExpiredSessions(ctx, s.now()) // best effort housekeeping
 	return Session{
 		Token: token, CSRFToken: s.csrf(id), ExpiresAt: expires,
 		User: users.User{
@@ -119,7 +122,8 @@ func (s *Service) Authenticate(ctx context.Context, token string) (authz.Princip
 		return authz.Principal{}, ErrNoSession
 	}
 	id := s.sessionID(token)
-	row, err := s.q.GetSessionUser(ctx, id)
+	// Expiry is judged with the same clock that set it in Login.
+	row, err := s.q.GetSessionUser(ctx, sqlcgen.GetSessionUserParams{ID: id, Now: s.now()})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return authz.Principal{}, ErrNoSession
 	}
@@ -161,10 +165,4 @@ func (s *Service) csrf(sessionID []byte) string {
 	mac := hmac.New(sha256.New, s.csrfKey)
 	mac.Write(sessionID)
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-func derive(secretKey, context string) []byte {
-	mac := hmac.New(sha256.New, []byte(secretKey))
-	mac.Write([]byte(context))
-	return mac.Sum(nil)
 }

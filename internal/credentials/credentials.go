@@ -6,6 +6,7 @@
 package credentials
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/audit"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
@@ -29,7 +31,6 @@ const (
 	usernamePrefix = "sp_"
 	secretPrefix   = "sps_"
 	maxLabelLength = 100
-	keyContext     = "sandpost/smtp-credential/v1"
 )
 
 // Domain errors.
@@ -74,12 +75,10 @@ type Service struct {
 	key []byte
 }
 
-// New returns a Service. secretKey is the instance SECRET_KEY, a dedicated
-// HMAC key is derived from it.
-func New(db store.DB, secretKey string) *Service {
-	mac := hmac.New(sha256.New, []byte(secretKey))
-	mac.Write([]byte(keyContext))
-	return &Service{db: db, q: sqlcgen.New(db), key: mac.Sum(nil)}
+// New returns a Service. key hashes credential secrets before they are stored
+// (see secrets.DeriveKeys).
+func New(db store.DB, key secrets.SMTPCredentialKey) *Service {
+	return &Service{db: db, q: sqlcgen.New(db), key: bytes.Clone(key)}
 }
 
 // Create generates a username and secret for the scope's project.
@@ -171,14 +170,15 @@ func (s *Service) Revoke(ctx context.Context, scope authz.Scope, id int64) error
 	return nil
 }
 
-// Verify checks username and secret. Every failure path returns ErrInvalid and
-// does the same HMAC work, so timing does not reveal whether a username exists.
+// Verify checks username and secret. Every failure path returns ErrInvalid.
+// The secret comparison is constant time. Whether a username exists is not
+// hidden from timing (the lookup differs), and need not be: usernames are
+// random, server generated and not secret, the secret is what authenticates.
 func (s *Service) Verify(ctx context.Context, username, secret string) (Identity, error) {
 	got := s.digest(secret)
 	row, err := s.q.GetActiveCredentialByUsername(ctx, username)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		_ = hmac.Equal(got, make([]byte, len(got)))
 		return Identity{}, ErrInvalid
 	case err != nil:
 		return Identity{}, fmt.Errorf("lookup credential: %w", err)

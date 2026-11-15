@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 	"github.com/sandpost-mail/sandpost/internal/tokens"
@@ -16,10 +18,10 @@ const secretKey = "0123456789abcdef0123456789abcdef"
 
 func TestCreateValidation(t *testing.T) {
 	pool := testutil.Pool(t)
-	svc := tokens.NewService(pool, secretKey)
+	svc := tokens.NewService(pool, secrets.MustDeriveKeys(secretKey).APIToken)
 	ctx := context.Background()
 	uid := testutil.User(t, pool, "u@example.test", false)
-	scope := authz.Trusted(testutil.Project(t, pool, "p"))
+	scope := authztest.Scope(testutil.Project(t, pool, "p"))
 
 	tests := []struct {
 		name    string
@@ -56,7 +58,7 @@ func TestCreateValidation(t *testing.T) {
 
 func TestAuthenticate(t *testing.T) {
 	pool := testutil.Pool(t)
-	svc := tokens.NewService(pool, secretKey)
+	svc := tokens.NewService(pool, secrets.MustDeriveKeys(secretKey).APIToken)
 	ctx := context.Background()
 	uid := testutil.User(t, pool, "u@example.test", true)
 	pid := testutil.Project(t, pool, "p")
@@ -65,7 +67,7 @@ func TestAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := svc.CreateForProject(ctx, authz.Trusted(pid), "p", []string{"read"})
+	project, err := svc.CreateForProject(ctx, authztest.Scope(pid), "p", []string{"read"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +89,7 @@ func TestAuthenticate(t *testing.T) {
 			t.Errorf("Authenticate(%q) = %v", bad, err)
 		}
 	}
-	other := tokens.NewService(pool, "fedcba9876543210fedcba9876543210")
+	other := tokens.NewService(pool, secrets.MustDeriveKeys("fedcba9876543210fedcba9876543210").APIToken)
 	if _, err := other.Authenticate(ctx, user.Secret); !errors.Is(err, tokens.ErrInvalid) {
 		t.Errorf("a token must not verify under another SECRET_KEY: %v", err)
 	}
@@ -95,11 +97,11 @@ func TestAuthenticate(t *testing.T) {
 
 func TestProjectTokensNeverExceedMember(t *testing.T) {
 	pool := testutil.Pool(t)
-	svc := tokens.NewService(pool, secretKey)
+	svc := tokens.NewService(pool, secrets.MustDeriveKeys(secretKey).APIToken)
 	ctx := context.Background()
 	pid := testutil.Project(t, pool, "p")
 	// A row stored with the widest scope, for example by a future bug or manual edit.
-	issued, err := svc.CreateForProject(ctx, authz.Trusted(pid), "", []string{"write"})
+	issued, err := svc.CreateForProject(ctx, authztest.Scope(pid), "", []string{"write"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,11 +116,11 @@ func TestProjectTokensNeverExceedMember(t *testing.T) {
 
 func TestRevocationAndDisabledOwners(t *testing.T) {
 	pool := testutil.Pool(t)
-	svc := tokens.NewService(pool, secretKey)
+	svc := tokens.NewService(pool, secrets.MustDeriveKeys(secretKey).APIToken)
 	ctx := context.Background()
 	uid := testutil.User(t, pool, "u@example.test", false)
 	pid := testutil.Project(t, pool, "p")
-	scope, other := authz.Trusted(pid), authz.Trusted(testutil.Project(t, pool, "q"))
+	scope, other := authztest.Scope(pid), authztest.Scope(testutil.Project(t, pool, "q"))
 
 	user, _ := svc.CreateForUser(ctx, uid, "", []string{"read"})
 	project, _ := svc.CreateForProject(ctx, scope, "", []string{"read"})
@@ -177,7 +179,7 @@ func TestRevocationAndDisabledOwners(t *testing.T) {
 
 func TestDatabaseFailure(t *testing.T) {
 	pool := testutil.Pool(t)
-	svc := tokens.NewService(pool, secretKey)
+	svc := tokens.NewService(pool, secrets.MustDeriveKeys(secretKey).APIToken)
 	uid := testutil.User(t, pool, "u@example.test", false)
 	issued, err := svc.CreateForUser(context.Background(), uid, "", []string{"read"})
 	if err != nil {
@@ -191,7 +193,7 @@ func TestDatabaseFailure(t *testing.T) {
 	if _, err := svc.ListForUser(ctx, uid); err == nil {
 		t.Error("list user")
 	}
-	if _, err := svc.ListForProject(ctx, authz.Trusted(1)); err == nil {
+	if _, err := svc.ListForProject(ctx, authztest.Scope(1)); err == nil {
 		t.Error("list project")
 	}
 	if err := svc.RevokeForUser(ctx, uid, 1); err == nil || errors.Is(err, tokens.ErrNotFound) {

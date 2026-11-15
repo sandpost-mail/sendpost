@@ -23,8 +23,8 @@ var (
 
 // Scope is proof that a principal passed the capability check for one
 // project. Services that read or write project data take a Scope instead of a
-// bare project id. The only constructors are Authorizer.Project, Verify on a
-// signed grant, and Trusted.
+// bare project id. The only constructors are Authorizer.Project and Verify on
+// a signed grant (tests use authztest.Scope, which goes through the former).
 type Scope struct {
 	projectID int64
 	role      Role
@@ -35,11 +35,6 @@ func (s Scope) ProjectID() int64 { return s.projectID }
 
 // Role returns the effective role the scope was granted with.
 func (s Scope) Role() Role { return s.role }
-
-// Trusted builds a Scope without a principal check. Use it only where access
-// was established by other means, for example the SMTP credential that fixes
-// the project of a session, or test setup. Handlers must not call it.
-func Trusted(projectID int64) Scope { return Scope{projectID: projectID, role: RoleOwner} }
 
 // Authorizer resolves roles from the database.
 type Authorizer struct {
