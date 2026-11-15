@@ -34,7 +34,7 @@ WHERE m.project_id = @project_id
   AND (sqlc.narg('subject_like')::text IS NULL OR m.subject ILIKE sqlc.narg('subject_like')::text)
   AND (sqlc.narg('tag')::text IS NULL OR EXISTS (
         SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id
-        WHERE mt.message_id = m.id AND t.name = sqlc.narg('tag')::text))
+        WHERE mt.message_id = m.id AND lower(t.name) = lower(sqlc.narg('tag')::text)))
   AND (sqlc.narg('received_after')::timestamptz IS NULL
        OR m.received_at >= sqlc.narg('received_after')::timestamptz)
   AND (sqlc.narg('received_before')::timestamptz IS NULL

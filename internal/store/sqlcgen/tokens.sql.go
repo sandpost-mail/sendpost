@@ -199,6 +199,19 @@ func (q *Queries) ListUserTokens(ctx context.Context, ownerUserID pgtype.Int8) (
 	return items, nil
 }
 
+const revokeAllUserTokens = `-- name: RevokeAllUserTokens :execrows
+UPDATE api_tokens SET revoked_at = now()
+WHERE owner_user_id = $1 AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeAllUserTokens(ctx context.Context, ownerUserID pgtype.Int8) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeAllUserTokens, ownerUserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const revokeProjectToken = `-- name: RevokeProjectToken :execrows
 UPDATE api_tokens SET revoked_at = now()
 WHERE project_id = $1 AND id = $2 AND revoked_at IS NULL

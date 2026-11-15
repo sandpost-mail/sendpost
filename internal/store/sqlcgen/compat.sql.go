@@ -228,6 +228,129 @@ func (q *Queries) CompatListMessages(ctx context.Context, arg CompatListMessages
 	return items, nil
 }
 
+const compatListPage = `-- name: CompatListPage :many
+WITH scored AS MATERIALIZED (
+    SELECT m.id, m.received_at, m.read_at IS NULL AS unread,
+           (cardinality($1::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, $1::text[], $2::text[], $3::boolean[])) AS matched
+    FROM messages m
+    WHERE m.project_id = $4
+), totals AS (
+    SELECT count(*)::bigint AS mailbox_total,
+           (count(*) FILTER (WHERE s.unread))::bigint AS mailbox_unread,
+           (count(*) FILTER (WHERE s.matched))::bigint AS matches_total,
+           (count(*) FILTER (WHERE s.matched AND s.unread))::bigint AS matches_unread
+    FROM scored s
+), page AS (
+    SELECT s.id FROM scored s
+    WHERE s.matched
+    ORDER BY s.received_at DESC, s.id DESC
+    OFFSET $5::int
+    LIMIT $6::int
+)
+SELECT t.mailbox_total, t.mailbox_unread, t.matches_total, t.matches_unread,
+       COALESCE(m.id, 0)::bigint AS id,
+       COALESCE(m.received_at, 'epoch'::timestamptz)::timestamptz AS received_at,
+       COALESCE(m.message_id_hdr, '')::text AS message_id_hdr,
+       COALESCE(m.from_addr, '')::text AS from_addr,
+       COALESCE(m.subject, '')::text AS subject,
+       COALESCE(m.size_bytes, 0)::bigint AS size_bytes,
+       m.read_at,
+       COALESCE(m.headers, '{}'::jsonb)::jsonb AS headers,
+       COALESCE(left(m.text_body, 1000), '')::text AS text_head,
+       COALESCE(CASE WHEN m.text_body = '' THEN left(m.html_body, 4000) ELSE '' END, '')::text AS html_head,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object('kind', r.kind, 'address', r.address)
+                                  ORDER BY r.kind, r.address)
+                 FROM message_recipients r WHERE r.message_id = m.id), '[]'::jsonb)::jsonb AS recipients,
+       COALESCE((SELECT array_agg(g.name ORDER BY g.name)
+                 FROM message_tags mt JOIN tags g ON g.id = mt.tag_id
+                 WHERE mt.message_id = m.id), '{}')::text[] AS tag_names,
+       (SELECT count(*) FROM attachments a WHERE a.message_id = m.id AND NOT a.inline)::int AS attachment_count
+FROM totals t
+LEFT JOIN page p ON true
+LEFT JOIN messages m ON m.id = p.id
+ORDER BY m.received_at DESC NULLS LAST, m.id DESC NULLS LAST
+`
+
+type CompatListPageParams struct {
+	Kinds     []string
+	Vals      []string
+	Negs      []bool
+	ProjectID int64
+	RowOffset int32
+	RowLimit  int32
+}
+
+type CompatListPageRow struct {
+	MailboxTotal    int64
+	MailboxUnread   int64
+	MatchesTotal    int64
+	MatchesUnread   int64
+	ID              int64
+	ReceivedAt      time.Time
+	MessageIDHdr    string
+	FromAddr        string
+	Subject         string
+	SizeBytes       int64
+	ReadAt          *time.Time
+	Headers         []byte
+	TextHead        string
+	HtmlHead        string
+	Recipients      []byte
+	TagNames        []string
+	AttachmentCount int32
+}
+
+// One page of a list or search together with the counts the Mailpit list
+// envelope needs: the whole mailbox (total, unread) and the matches. The
+// filter is evaluated once per message of the project (scored is
+// materialized), and the per message sub-selects run for the page only.
+// There is always one row: when the page is empty (no match, or an offset
+// past the end) it carries the counts and id = 0.
+func (q *Queries) CompatListPage(ctx context.Context, arg CompatListPageParams) ([]CompatListPageRow, error) {
+	rows, err := q.db.Query(ctx, compatListPage,
+		arg.Kinds,
+		arg.Vals,
+		arg.Negs,
+		arg.ProjectID,
+		arg.RowOffset,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CompatListPageRow
+	for rows.Next() {
+		var i CompatListPageRow
+		if err := rows.Scan(
+			&i.MailboxTotal,
+			&i.MailboxUnread,
+			&i.MatchesTotal,
+			&i.MatchesUnread,
+			&i.ID,
+			&i.ReceivedAt,
+			&i.MessageIDHdr,
+			&i.FromAddr,
+			&i.Subject,
+			&i.SizeBytes,
+			&i.ReadAt,
+			&i.Headers,
+			&i.TextHead,
+			&i.HtmlHead,
+			&i.Recipients,
+			&i.TagNames,
+			&i.AttachmentCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const compatListTags = `-- name: CompatListTags :many
 SELECT t.name, count(*)::bigint AS messages
 FROM tags t JOIN message_tags mt ON mt.tag_id = t.id

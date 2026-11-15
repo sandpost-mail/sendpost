@@ -220,3 +220,19 @@ func (q *Queries) ListComments(ctx context.Context, arg ListCommentsParams) ([]C
 	}
 	return items, nil
 }
+
+const notifyChannel = `-- name: NotifyChannel :exec
+SELECT pg_notify($1::text, $2::text)
+`
+
+type NotifyChannelParams struct {
+	Channel string
+	Payload string
+}
+
+// Publishes a payload on a LISTEN/NOTIFY channel (see internal/events), so it
+// can run on a transaction bound Queries and fire only on commit.
+func (q *Queries) NotifyChannel(ctx context.Context, arg NotifyChannelParams) error {
+	_, err := q.db.Exec(ctx, notifyChannel, arg.Channel, arg.Payload)
+	return err
+}

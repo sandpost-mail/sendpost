@@ -15,6 +15,10 @@ FROM api_tokens WHERE project_id = $1 ORDER BY id DESC;
 UPDATE api_tokens SET revoked_at = now()
 WHERE owner_user_id = $1 AND id = $2 AND revoked_at IS NULL;
 
+-- name: RevokeAllUserTokens :execrows
+UPDATE api_tokens SET revoked_at = now()
+WHERE owner_user_id = $1 AND revoked_at IS NULL;
+
 -- name: RevokeProjectToken :execrows
 UPDATE api_tokens SET revoked_at = now()
 WHERE project_id = $1 AND id = $2 AND revoked_at IS NULL;

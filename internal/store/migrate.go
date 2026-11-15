@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 
@@ -22,60 +23,96 @@ type MigrationStatus struct {
 	Applied bool
 }
 
-func provider(pool *pgxpool.Pool) (*goose.Provider, error) {
+// migrationLockID is goose's default advisory lock key. Sandpost takes it
+// itself, around both the goose and the River migrations, so it still
+// excludes older binaries that let goose take it.
+const migrationLockID = lock.DefaultLockID
+
+// provider builds a goose provider over a *sql.DB wrapping the pool. The
+// returned close func closes that wrapper (stopping its background
+// goroutine); the pgx pool itself stays open. No goose session locker is
+// configured: callers that change the schema hold migrationLockID.
+func provider(pool *pgxpool.Pool) (*goose.Provider, func(), error) {
 	sub, err := fs.Sub(migrationsFS, "migrations")
 	if err != nil {
-		return nil, fmt.Errorf("embedded migrations: %w", err)
+		return nil, nil, fmt.Errorf("embedded migrations: %w", err)
 	}
-	locker, err := lock.NewPostgresSessionLocker()
+	db := stdlib.OpenDBFromPool(pool)
+	p, err := goose.NewProvider(goose.DialectPostgres, db, sub)
 	if err != nil {
-		return nil, fmt.Errorf("migration locker: %w", err)
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("goose provider: %w", err)
 	}
-	// The *sql.DB wrapper shares the pool; it is not closed here.
-	p, err := goose.NewProvider(goose.DialectPostgres, stdlib.OpenDBFromPool(pool), sub,
-		goose.WithSessionLocker(locker))
+	return p, func() { _ = db.Close() }, nil
+}
+
+// withMigrationLock runs fn while holding the Postgres advisory lock that
+// serialises migrations, on a dedicated pool connection.
+func withMigrationLock(ctx context.Context, pool *pgxpool.Pool, fn func() error) (err error) {
+	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("goose provider: %w", err)
+		return fmt.Errorf("migration lock: %w", err)
 	}
-	return p, nil
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
+		return fmt.Errorf("migration lock: %w", err)
+	}
+	defer func() {
+		if _, uerr := conn.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", migrationLockID); uerr != nil {
+			// The session keeps the lock: drop the connection instead of
+			// returning it to the pool.
+			_ = conn.Conn().Close(context.WithoutCancel(ctx))
+			err = errors.Join(err, fmt.Errorf("migration unlock: %w", uerr))
+		}
+	}()
+	return fn()
 }
 
 // MigrateUp applies all pending migrations under a Postgres advisory lock and
-// returns the number applied. The job queue's own migrations run last.
+// returns the number applied. The job queue's own migrations run last, under
+// the same lock, so concurrent `migrate up` runs are fully serialised.
 func MigrateUp(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	p, err := provider(pool)
+	p, closeP, err := provider(pool)
 	if err != nil {
 		return 0, err
 	}
-	res, err := p.Up(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("migrate up: %w", err)
-	}
-	n, err := riverUp(ctx, pool)
-	if err != nil {
-		return 0, err
-	}
-	return len(res) + n, nil
+	defer closeP()
+	applied := 0
+	err = withMigrationLock(ctx, pool, func() error {
+		res, err := p.Up(ctx)
+		applied += len(res)
+		if err != nil {
+			return fmt.Errorf("migrate up: %w", err)
+		}
+		n, err := riverUp(ctx, pool)
+		applied += n
+		return err
+	})
+	return applied, err
 }
 
-// MigrateDown rolls back the most recent migration.
+// MigrateDown rolls back the most recent migration, under the migration lock.
 func MigrateDown(ctx context.Context, pool *pgxpool.Pool) error {
-	p, err := provider(pool)
+	p, closeP, err := provider(pool)
 	if err != nil {
 		return err
 	}
-	if _, err := p.Down(ctx); err != nil {
-		return fmt.Errorf("migrate down: %w", err)
-	}
-	return nil
+	defer closeP()
+	return withMigrationLock(ctx, pool, func() error {
+		if _, err := p.Down(ctx); err != nil {
+			return fmt.Errorf("migrate down: %w", err)
+		}
+		return nil
+	})
 }
 
 // MigrationStatuses lists every known migration with its applied state.
 func MigrationStatuses(ctx context.Context, pool *pgxpool.Pool) ([]MigrationStatus, error) {
-	p, err := provider(pool)
+	p, closeP, err := provider(pool)
 	if err != nil {
 		return nil, err
 	}
+	defer closeP()
 	st, err := p.Status(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("migration status: %w", err)

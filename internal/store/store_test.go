@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
@@ -19,6 +20,29 @@ func TestConnectErrors(t *testing.T) {
 	}
 	if _, err := store.Connect(ctx, "postgres://u:p@127.0.0.1:1/db?connect_timeout=1"); err == nil {
 		t.Error("expected ping error")
+	}
+}
+
+func TestConnectPoolSize(t *testing.T) {
+	dsn := testutil.PostgresDSN(t)
+	tests := []struct {
+		name string
+		dsn  string
+		want int32
+	}{
+		{"default", dsn, store.DefaultMaxConns()},
+		{"dsn override", dsn + "&pool_max_conns=3", 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testutil.PoolFor(t, tc.dsn)
+			if got := pool.Config().MaxConns; got != tc.want {
+				t.Errorf("MaxConns = %d, want %d", got, tc.want)
+			}
+		})
+	}
+	if store.DefaultMaxConns() < 10 {
+		t.Errorf("DefaultMaxConns = %d, want at least 10", store.DefaultMaxConns())
 	}
 }
 
@@ -65,10 +89,10 @@ func TestMigrateAndQueries(t *testing.T) {
 	if err := store.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	if _, err := pool.Exec(ctx, "SELECT 1 FROM comments"); err == nil {
-		t.Fatal("comments should be gone after rolling back the latest migration")
+	if _, err := pool.Exec(ctx, "SELECT actor_token_id FROM audit_log"); err == nil {
+		t.Fatal("audit_log.actor_token_id should be gone after rolling back the latest migration")
 	}
-	for _, tbl := range []string{"deliveries", "delivery_policies", "transports"} {
+	for _, tbl := range []string{"comments", "deliveries", "delivery_policies", "transports"} {
 		if _, err := pool.Exec(ctx, "SELECT 1 FROM "+tbl); err != nil {
 			t.Fatalf("%s: the delivery migration must stay applied: %v", tbl, err)
 		}
@@ -90,6 +114,39 @@ func TestMigrateAndQueries(t *testing.T) {
 	}
 	if got, err := q.GetSetting(ctx, "k"); err != nil || got != "two" {
 		t.Fatalf("older migrations must stay applied: %q %v", got, err)
+	}
+}
+
+// TestConcurrentMigrateUp runs two migrations at once: the advisory lock
+// covers goose and River, so both succeed and every migration applies once.
+func TestConcurrentMigrateUp(t *testing.T) {
+	ctx := context.Background()
+	dsn := testutil.PostgresDSN(t)
+	a, b := testutil.PoolFor(t, dsn), testutil.PoolFor(t, dsn)
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 2)
+	for _, p := range []*pgxpool.Pool{a, b} {
+		go func() {
+			n, err := store.MigrateUp(ctx, p)
+			ch <- result{n, err}
+		}()
+	}
+	r1, r2 := <-ch, <-ch
+	if r1.err != nil || r2.err != nil {
+		t.Fatalf("concurrent up: %v / %v", r1.err, r2.err)
+	}
+	st, err := store.MigrationStatuses(ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.n+r2.n != len(st) || min(r1.n, r2.n) != 0 {
+		t.Errorf("applied %d + %d, want %d once", r1.n, r2.n, len(st))
+	}
+	if pending, err := store.RiverPending(ctx, a); err != nil || pending != 0 {
+		t.Errorf("river pending %d %v", pending, err)
 	}
 }
 

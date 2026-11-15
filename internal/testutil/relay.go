@@ -60,7 +60,7 @@ type FakeRelay struct {
 }
 
 // StartRelay starts a FakeRelay on a free local port, stopped at test end.
-func StartRelay(t *testing.T, opts RelayOptions) *FakeRelay {
+func StartRelay(t testing.TB, opts RelayOptions) *FakeRelay {
 	t.Helper()
 	r := &FakeRelay{Host: "127.0.0.1", opts: opts}
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -208,7 +208,7 @@ func (s *relayAuthSession) Auth(mech string) (sasl.Server, error) {
 	}), nil
 }
 
-func selfSigned(t *testing.T, names []string) (tls.Certificate, *x509.CertPool) {
+func selfSigned(t testing.TB, names []string) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	if len(names) == 0 {
 		names = []string{"127.0.0.1", "localhost"}

@@ -23,10 +23,11 @@ func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 	return count, err
 }
 
-const createAdminIfNoUsers = `-- name: CreateAdminIfNoUsers :execrows
+const createAdminIfNoUsers = `-- name: CreateAdminIfNoUsers :one
 INSERT INTO users (email, name, password_hash, is_admin, must_change_password)
 SELECT $1::text, $2::text, $3::text, true, true
 WHERE NOT EXISTS (SELECT 1 FROM users)
+RETURNING id
 `
 
 type CreateAdminIfNoUsersParams struct {
@@ -35,12 +36,12 @@ type CreateAdminIfNoUsersParams struct {
 	PasswordHash string
 }
 
+// Returns no row when users already exist.
 func (q *Queries) CreateAdminIfNoUsers(ctx context.Context, arg CreateAdminIfNoUsersParams) (int64, error) {
-	result, err := q.db.Exec(ctx, createAdminIfNoUsers, arg.Email, arg.Name, arg.PasswordHash)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	row := q.db.QueryRow(ctx, createAdminIfNoUsers, arg.Email, arg.Name, arg.PasswordHash)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const createUser = `-- name: CreateUser :one
@@ -217,6 +218,19 @@ func (q *Queries) LockActiveAdmins(ctx context.Context) ([]int64, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockUserPasswordHash = `-- name: LockUserPasswordHash :one
+SELECT password_hash FROM users WHERE id = $1 FOR UPDATE
+`
+
+// Locks the user row for the rest of the transaction, so a password change
+// verifies and writes against the same hash.
+func (q *Queries) LockUserPasswordHash(ctx context.Context, id int64) (string, error) {
+	row := q.db.QueryRow(ctx, lockUserPasswordHash, id)
+	var password_hash string
+	err := row.Scan(&password_hash)
+	return password_hash, err
 }
 
 const setUserPassword = `-- name: SetUserPassword :execrows

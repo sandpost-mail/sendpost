@@ -18,6 +18,10 @@ DELETE FROM groups WHERE id = $1;
 -- name: AddGroupMember :exec
 INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;
 
+-- Like AddGroupMember, but reports 0 when the user already was a member.
+-- name: InsertGroupMember :execrows
+INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;
+
 -- name: RemoveGroupMember :execrows
 DELETE FROM group_members WHERE group_id = $1 AND user_id = $2;
 

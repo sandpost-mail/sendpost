@@ -1,10 +1,12 @@
 -- name: CountUsers :one
 SELECT count(*) FROM users;
 
--- name: CreateAdminIfNoUsers :execrows
+-- Returns no row when users already exist.
+-- name: CreateAdminIfNoUsers :one
 INSERT INTO users (email, name, password_hash, is_admin, must_change_password)
 SELECT @email::text, @name::text, @password_hash::text, true, true
-WHERE NOT EXISTS (SELECT 1 FROM users);
+WHERE NOT EXISTS (SELECT 1 FROM users)
+RETURNING id;
 
 -- name: CreateUser :one
 INSERT INTO users (email, name, password_hash, is_admin, must_change_password)
@@ -21,6 +23,11 @@ FROM users WHERE lower(email) = lower(@email::text);
 
 -- name: GetUserPasswordHash :one
 SELECT password_hash FROM users WHERE id = $1;
+
+-- Locks the user row for the rest of the transaction, so a password change
+-- verifies and writes against the same hash.
+-- name: LockUserPasswordHash :one
+SELECT password_hash FROM users WHERE id = $1 FOR UPDATE;
 
 -- name: ListUsers :many
 SELECT id, email, name, is_admin, must_change_password, created_at, disabled_at
