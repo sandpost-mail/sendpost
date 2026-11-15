@@ -26,20 +26,23 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up --build
 
 ## Configuration
 
-Environment variables, optionally preloaded from a `KEY=VALUE` file named by `SANDPOST_CONFIG_FILE` (environment wins over the file).
+Environment variables, optionally preloaded from a `KEY=VALUE` file named by `SANDPOST_CONFIG_FILE` (environment wins over the file). In the file, values may be wrapped in single or double quotes (taken literally, no escapes), and `#` starts a comment at the start of a line, after a closing quote, or after a space in an unquoted value. A file holding `SECRET_KEY` or `ADMIN_PASSWORD` is refused when group or others can read it (`chmod 600`; for Kubernetes or Docker secret mounts set the mode to `0400`).
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
 | `DATABASE_URL` | yes | | Postgres connection string |
-| `SECRET_KEY` | yes | | at least 32 bytes |
+| `SECRET_KEY` | yes | | at least 32 bytes with at least 8 distinct characters, for example `openssl rand -hex 32` |
 | `SMTP_LISTEN` | no | `:1025` | |
 | `HTTP_LISTEN` | no | `:8080` | |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | no | | set both or neither |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | no | | first boot bootstrap, set both or neither. Creates an admin (password change required at first login) only when there are no users yet, never overwrites |
 | `COOKIE_SECURE` | no | `true` | marks the UI session cookie `Secure` and uses the `__Host-` cookie name. Works over HTTPS (also behind a TLS terminating proxy) and on `http://localhost` in Chrome and Firefox. Set `false` only for plain http on another host name (for example a LAN address) or Safari on localhost. `make dev` and `make dev-nodb` default it to `false` |
 | `MAX_MESSAGE_BYTES` | no | 26214400 | |
-| `SMTP_TLS_MODE` | no | `off`, or `starttls` when a certificate is set | `off`, `starttls` (plaintext AUTH still allowed), `required` (AUTH only after STARTTLS), `implicit` (TLS from the first byte). Anything but `off` needs the certificate |
+| `SMTP_TLS_MODE` | no | `off`, or `starttls` when a certificate is set | `off` (plaintext, AUTH allowed without TLS), `starttls` and `required` (STARTTLS offered, AUTH only after it), `implicit` (TLS from the first byte). Anything but `off` needs the certificate |
 | `LOG_LEVEL`, `LOG_FORMAT` | no | `info`, `text` | format is `text` or `json` |
+| `SMTP_MAX_CONNECTIONS` | no | `100` | concurrent SMTP connections, further clients wait in the listen backlog |
+| `TRUSTED_PROXIES` | no | | comma separated CIDRs (or addresses) of reverse proxies whose `X-Forwarded-For` is believed for the login rate limit. The rightmost hop that is not a trusted proxy is the client. Empty trusts nobody |
+| `RELAY_DENY_CIDRS` | no | | comma separated CIDRs the delivery relay must never connect to, for example `127.0.0.0/8,169.254.0.0/16`. Empty (default) denies nothing |
 
 ## Using it
 
@@ -123,7 +126,7 @@ LINK=$(sandpost extract --link-contains /verify --run "$RUN")  # first link cont
 sandpost extract --message 42 --code-pattern 'PIN: (\d{4})' --json
 ```
 
-`wait` accepts `--query`, `--count` (1 to 50), `--timeout` (seconds or a duration such as `45s`, 0 to 120s, default 30s), `--after-id` and `--json`. `extract` waits like `wait` (and reads the oldest match, `--latest` the newest) unless `--message ID` is given, then prints the first code, or the first link when `--link-contains` is set without `--code-pattern` (`--print code|link` forces it, `--all` prints every value, `--json` prints `message_id`, `value`, `links` and `codes`). Only the value goes to stdout, messages go to stderr.
+`wait` accepts `--query`, `--count` (1 to 50), `--timeout` (seconds or a duration such as `45s`, 0 to 120s, default 30s), `--after-id` and `--json`. `extract` waits like `wait` (and reads the oldest match, `--latest` the newest) unless `--message ID` is given, then prints the first code, or the first link when `--link-contains` is set without `--code-pattern` (`--print code|link` forces it, `--all` prints every value, `--json` prints `message_id`, `value`, `links` and `codes`). Only the value goes to stdout, messages go to stderr. Both print a warning on stderr when `SANDPOST_URL` is plain `http://` to a host other than localhost, since the token then crosses the network unencrypted.
 
 | Exit | Meaning |
 |---|---|
@@ -145,7 +148,7 @@ Run on the server with direct database access (`DATABASE_URL` and `SECRET_KEY`, 
 |---|---|
 | `sandpost admin list-users` | list users (id, email, admin, disabled, must change password) |
 | `sandpost admin create-admin <email> [--name N]` | create an administrator, password change required at first login |
-| `sandpost admin reset-password <email>` | set a new password, require a change at next login, end all of the user's sessions |
+| `sandpost admin reset-password <email>` | set a new password, require a change at next login, end all of the user's sessions and revoke all of the user's API tokens |
 | `sandpost admin unlock <email>` | enable a disabled user (clears `disabled_at`) |
 | `sandpost admin promote <email>` | make the user an administrator |
 

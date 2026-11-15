@@ -19,6 +19,7 @@ Sandpost serves a subset of the [Mailpit](https://github.com/axllent/mailpit) RE
 - A project the caller has no role on, a token of another project and an unknown slug all answer the same `404 page not found`. Message ids of another project behave like unknown ids: reads answer 404, writes by id succeed and change nothing.
 - Without credentials: 401, with a `WWW-Authenticate: Basic` challenge when no `Authorization` header was sent at all. Wrong credentials: 401 without challenge.
 - Errors are plain text like Mailpit (`404 page not found`, 400 with a message). Mutations answer `ok`. Unexpected failures are logged and answer a generic 500.
+- JSON request bodies are decoded strictly: keys match without regard to case, but an unknown key or data after the JSON value answers 400 (Mailpit ignores unknown keys), so a mistyped key can never widen a write.
 - Any other path under `/api/v1/` answers `404 page not found`, never the web UI.
 
 ## Endpoint matrix
@@ -34,7 +35,7 @@ Status: `implemented` (same behaviour apart from the notes), `partial` (works wi
 | POST | `/api/v1/send` | unsupported | Mail enters through authenticated SMTP only. |
 | GET | `/api/v1/messages` | partial | `before=` is ignored. `limit=0` returns everything up to 1000 messages, larger limits are capped at 1000. `Username` is always empty. |
 | PUT | `/api/v1/messages` | implemented | By `IDs`, by `Search`, or all messages. A `Search` without any usable term, or with an invalid date, answers 400 instead of widening to everything. |
-| DELETE | `/api/v1/messages` | implemented | Deletes the given `IDs`, or every message of the project when there is none (empty body or empty list), as Mailpit does. A body that is not valid JSON answers 400, Mailpit deletes everything in that case. |
+| DELETE | `/api/v1/messages` | implemented | Deletes the given `IDs`, or every message of the project when there is none (empty body or empty list), as Mailpit does. A body that is not valid JSON, or that has a key other than `IDs` (a typo such as `Ids` matches, keys are case insensitive, but `ID` or `messages` do not), answers 400, Mailpit deletes everything in that case. |
 | GET | `/api/v1/search` | partial | Common subset of the syntax, see below. |
 | DELETE | `/api/v1/search` | implemented | Same syntax as search. A query without any usable term answers 400. |
 | GET | `/api/v1/message/{ID}` | partial | Marks the message read, like Mailpit. `Username` is always empty. `To` and `Cc` carry display names when the header parses, `Bcc` is the envelope recipients that are in neither. `Date` is the Date header, else the time of receipt. |
@@ -47,7 +48,7 @@ Status: `implemented` (same behaviour apart from the notes), `partial` (works wi
 | GET | `/api/v1/message/{ID}/sa-check` | unsupported | SpamAssassin is not integrated. |
 | POST | `/api/v1/message/{ID}/release` | partial | Body `{"To": [...]}`. Sends through the project's transport (set up in the UI, see the delivery policy), and only to addresses on the project allowlist. Answers `ok` once the release is queued (a job sends it, the delivery status is in the UI and `GET /_/api/v1/projects/{pid}/messages/{mid}/deliveries`). 400 with the reason when a target is not allowlisted, the transport is missing or disabled, or `To` is empty. Needs `write` (member). `latest` works. Mailpit relays to any address through its single global relay, Sandpost refuses everything off the allowlist. |
 | GET | `/api/v1/tags` | implemented | Tags in use in the project, sorted. |
-| PUT | `/api/v1/tags` | implemented | Replaces the tags of the given messages. Invalid names are dropped, case duplicates collapse (the first spelling wins), as in Mailpit. Tag names are case insensitive. |
+| PUT | `/api/v1/tags` | implemented | Replaces the tags of the given messages. Invalid names are dropped, case duplicates collapse (the first spelling wins), as in Mailpit. Tag names are case insensitive. At most 100 `Tags` and 100000 `IDs` x `Tags` per request, more answers 400. |
 | PUT | `/api/v1/tags/{Tag}` | implemented | Rename, also a change of case only. The tag is found without regard to case. 404 when the tag does not exist (even when the new name is the same), 400 when the new name is invalid or used by another tag. Mailpit answers 400 for a missing tag. |
 | DELETE | `/api/v1/tags/{Tag}` | implemented | Removes the tag from its messages. 404 when it does not exist (Mailpit: 400). |
 | GET | `/view/{ID}.html` | partial | Served at `/view/...` and `/p/{slug}/view/...`, outside `/api/v1`. `embed=1` is ignored. Inline images point at the part endpoint of this API, which needs the token, so a browser only shows them when it sends credentials. Carries a sandbox CSP. Marks the message read. |
@@ -91,7 +92,8 @@ Not part of this syntax: the native search keys `body:` and `date:`, they are on
 
 - Mailpit's websocket (`/api/events`), its SMTP relay, the UI's own Basic auth, CORS configuration and tag filters (`--tags`) are not provided. Sandpost has its own tag rules (project settings), which also cover an `X-Tags` style header.
 - Responses to deletions do not push events to the Sandpost UI stream yet, the UI shows them on the next load.
-- Compat requests are not written to the audit log (they are not administrative actions).
+- Reads, deletes and tag changes through the compat API are not written to the audit log. A release (`POST /message/{ID}/release`) is audited like the native one, with the user of a user token as actor (project tokens have no user, so their releases have no actor).
+- Requests that carry a body (`PUT`, `POST`, `DELETE` with JSON) must send `Content-Type: application/json`, otherwise 415. Mailpit clients do; it keeps cross site form posts from using credentials a browser cached after the Basic challenge. A body over 1 MiB answers 413.
 
 ## Verification status
 
