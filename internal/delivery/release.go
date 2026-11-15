@@ -11,6 +11,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/messages"
 	"github.com/sandpost-mail/sandpost/internal/policy"
+	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
 
@@ -45,35 +46,43 @@ func (s *Service) Release(ctx context.Context, scope authz.Scope, messageID int6
 	if s.queue == nil {
 		return nil, errors.New("release: no job queue configured")
 	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	out, err := s.release(ctx, tx, scope.ProjectID(), messageID, targets)
-	if errors.Is(err, pgx.ErrNoRows) {
+	var out []Delivery
+	err := store.InTxRaw(ctx, s.db, func(tx pgx.Tx) error {
+		var err error
+		out, err = s.release(ctx, tx, scope.ProjectID(), messageID, targets)
+		return err
+	})
+	switch {
+	case errors.Is(err, errNoMessage):
 		return nil, messages.ErrNotFound
-	}
-	if err != nil {
-		if errors.Is(err, policy.ErrBlocked) {
-			return nil, err
-		}
+	case errors.Is(err, policy.ErrBlocked):
+		return nil, err
+	case err != nil:
 		return nil, fmt.Errorf("release message: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return out, nil
 }
 
+var errNoMessage = errors.New("message not in project")
+
+// release validates the targets and queues the job. It never reads the
+// message body: the job loads and rewrites it when it runs, so the request
+// does not hold a copy of a possibly large message.
 func (s *Service) release(ctx context.Context, tx pgx.Tx, projectID, messageID int64, targets []string) ([]Delivery, error) {
 	q := sqlcgen.New(tx)
-	in, err := loadInputs(ctx, q, projectID, messageID)
+	ok, err := q.MessageExists(ctx, sqlcgen.MessageExistsParams{ProjectID: projectID, ID: messageID})
+	if err != nil {
+		return nil, fmt.Errorf("check message: %w", err)
+	}
+	if !ok {
+		return nil, errNoMessage
+	}
+	in, err := loadSettings(ctx, q, projectID)
 	if err != nil {
 		return nil, err
 	}
-	plan, err := policy.EvaluateRelease(policy.ReleaseInput{
-		Policy: in.policy, Transport: in.transport, Message: in.message, Targets: targets,
+	plan, err := policy.CheckRelease(policy.ReleaseInput{
+		Policy: in.policy, Transport: in.transport, Targets: targets,
 	})
 	if err != nil {
 		return nil, err

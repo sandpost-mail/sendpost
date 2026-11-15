@@ -28,6 +28,15 @@ const (
 	// jobTimeout bounds one attempt, including every SMTP step.
 	jobTimeout  = 3 * time.Minute
 	workerCount = 4
+	// SoftStopTimeout is how long River waits on shutdown for running jobs
+	// before it cancels their context. A cancelled attempt still records its
+	// state (see recordTimeout) and is retried, so the stop budget of the
+	// caller must exceed SoftStopTimeout plus recordTimeout.
+	SoftStopTimeout = 10 * time.Second
+	// recordTimeout bounds storing an attempt's outcome. Recording runs on a
+	// context detached from the job's cancellation, so a relay answer that
+	// arrives just before the job deadline, or a shutdown, is still stored.
+	recordTimeout = 5 * time.Second
 	// DeliverKind is the River job kind.
 	DeliverKind = "deliver_message"
 
@@ -72,7 +81,7 @@ func (q *RiverQueue) InsertTx(ctx context.Context, tx pgx.Tx, args DeliverArgs) 
 // merely queues releases needs. opts adjust the River configuration (tests use
 // them for a fast retry policy).
 func NewRiverClient(pool *pgxpool.Pool, w *Worker, log *slog.Logger, opts ...func(*river.Config)) (*river.Client[pgx.Tx], error) {
-	cfg := &river.Config{Logger: log}
+	cfg := &river.Config{Logger: log, SoftStopTimeout: SoftStopTimeout}
 	if w != nil {
 		workers := river.NewWorkers()
 		river.AddWorker(workers, w)
@@ -125,12 +134,12 @@ type Worker struct {
 	log   *slog.Logger
 }
 
-// NewWorker returns a Worker.
-func NewWorker(db store.DB, secretKey string, relay Relay, log *slog.Logger) *Worker {
+// NewWorker returns a Worker. box opens the stored relay passwords.
+func NewWorker(db store.DB, box *secrets.Box, relay Relay, log *slog.Logger) *Worker {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Worker{db: db, q: sqlcgen.New(db), box: secrets.New(secretKey), relay: relay, log: log}
+	return &Worker{db: db, q: sqlcgen.New(db), box: box, relay: relay, log: log}
 }
 
 // Timeout implements river.Worker.
@@ -139,7 +148,32 @@ func (*Worker) Timeout(*river.Job[DeliverArgs]) time.Duration { return jobTimeou
 // Work implements river.Worker.
 func (w *Worker) Work(ctx context.Context, job *river.Job[DeliverArgs]) error {
 	last := job.Attempt >= job.MaxAttempts
-	return w.Process(ctx, job.Args, last)
+	err := w.Process(ctx, job.Args, last)
+	if err != nil && last {
+		w.giveUp(ctx, job.Args, err)
+	}
+	return err
+}
+
+// giveUp moves what is still pending to failed after the last attempt
+// returned an error (a database error, a cancelled job), so no row is left
+// pending once River has discarded the job. It is best effort.
+func (w *Worker) giveUp(ctx context.Context, a DeliverArgs, cause error) {
+	w.log.Warn("delivery gave up after an error", "project_id", a.ProjectID, "message_id", a.MessageID,
+		"run", runKind(a), "error", cause)
+	rctx, cancel := detached(ctx)
+	defer cancel()
+	if err := w.q.FailPendingRun(rctx, sqlcgen.FailPendingRunParams{
+		ProjectID: a.ProjectID, MessageID: a.MessageID, Run: a.Run, Error: "gave up, the last attempt could not complete",
+	}); err != nil {
+		w.log.Error("fail pending deliveries", "project_id", a.ProjectID, "message_id", a.MessageID, "error", err)
+	}
+}
+
+// detached returns a context that outlives the job's cancellation (timeout,
+// shutdown) but is bounded by recordTimeout, for storing outcomes.
+func detached(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 }
 
 // inputs is the stored state the engine evaluates.
@@ -164,7 +198,11 @@ func loadInputs(ctx context.Context, q *sqlcgen.Queries, projectID, messageID in
 	if err != nil {
 		return inputs{}, fmt.Errorf("load recipients: %w", err)
 	}
-	in := inputs{raw: src.Raw, message: policy.Message{Raw: src.Raw}}
+	in, err := loadSettings(ctx, q, projectID)
+	if err != nil {
+		return inputs{}, err
+	}
+	in.raw, in.message.Raw = src.Raw, src.Raw // one buffer, never copied here
 	for _, r := range rcpts {
 		switch r.Kind {
 		case "envelope":
@@ -175,6 +213,13 @@ func loadInputs(ctx context.Context, q *sqlcgen.Queries, projectID, messageID in
 			in.message.Cc = append(in.message.Cc, r.Address)
 		}
 	}
+	return in, nil
+}
+
+// loadSettings reads the policy and the transport of the project, without
+// the message. A release request only needs these to validate its targets.
+func loadSettings(ctx context.Context, q *sqlcgen.Queries, projectID int64) (inputs, error) {
+	var in inputs
 	prow, err := q.GetDeliveryPolicy(ctx, projectID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -259,6 +304,8 @@ func (w *Worker) Process(ctx context.Context, a DeliverArgs, last bool) error {
 // block records that the run was refused and ends the job without retry: a
 // misconfiguration does not fix itself, and a retry could only ever send more.
 func (w *Worker) block(ctx context.Context, a DeliverArgs, reason string) error {
+	ctx, cancel := detached(ctx)
+	defer cancel()
 	reason = cleanText(reason, "")
 	w.log.Warn("delivery blocked", "project_id", a.ProjectID, "message_id", a.MessageID, "run", runKind(a), "reason", reason)
 	if err := w.q.BlockRun(ctx, sqlcgen.BlockRunParams{ProjectID: a.ProjectID, MessageID: a.MessageID, Run: a.Run, Error: reason}); err != nil {
@@ -329,7 +376,9 @@ func (w *Worker) send(ctx context.Context, a DeliverArgs, plan policy.Plan, cfg 
 			continue
 		}
 		results := w.relay.Send(ctx, cfg, sub)
-		n, text, err := w.record(ctx, a, sub, results, pending)
+		rctx, cancel := detached(ctx)
+		n, text, err := w.record(rctx, a, sub, results, pending)
+		cancel()
 		if err != nil {
 			return err
 		}
@@ -344,7 +393,9 @@ func (w *Worker) send(ctx context.Context, a DeliverArgs, plan policy.Plan, cfg 
 	if last {
 		w.log.Warn("delivery gave up", "project_id", a.ProjectID, "message_id", a.MessageID, "pending", remaining)
 		msg := "gave up, retries exhausted: " + lastErr
-		if err := w.q.FailPendingRun(ctx, sqlcgen.FailPendingRunParams{
+		rctx, cancel := detached(ctx)
+		defer cancel()
+		if err := w.q.FailPendingRun(rctx, sqlcgen.FailPendingRunParams{
 			ProjectID: a.ProjectID, MessageID: a.MessageID, Run: a.Run, Error: cleanText(msg, ""),
 		}); err != nil {
 			return fmt.Errorf("fail pending: %w", err)

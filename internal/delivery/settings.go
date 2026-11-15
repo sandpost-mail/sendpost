@@ -231,8 +231,12 @@ func (s *Service) DeleteTransport(ctx context.Context, scope authz.Scope) error 
 // secures it and authenticates, and sends no mail. It works whether or not the
 // transport is enabled. It never tests unsaved settings, so the stored
 // password only ever goes to the stored host. The error text carries nothing
-// that the remote host said.
+// that the remote host said. It is limited to a few tests per minute and
+// project, beyond that it returns a *RateLimitError (ErrRateLimited).
 func (s *Service) TestTransport(ctx context.Context, scope authz.Scope) (CheckResult, error) {
+	if wait, ok := s.tests.take(scope.ProjectID()); !ok {
+		return CheckResult{}, &RateLimitError{RetryAfter: wait}
+	}
 	row, err := s.q.GetTransport(ctx, scope.ProjectID())
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CheckResult{}, ErrNotFound
@@ -240,15 +244,11 @@ func (s *Service) TestTransport(ctx context.Context, scope authz.Scope) (CheckRe
 	if err != nil {
 		return CheckResult{}, fmt.Errorf("get transport: %w", err)
 	}
-	cfg, err := s.relayConfig(row)
+	cfg, err := relayConfigOf(s.box, row)
 	if err != nil {
 		return CheckResult{Error: "the stored password can not be decrypted, enter it again"}, nil //nolint:nilerr // reported in the result
 	}
 	return s.relay.Check(ctx, cfg), nil
-}
-
-func (s *Service) relayConfig(row sqlcgen.Transport) (RelayConfig, error) {
-	return relayConfigOf(s.box, row)
 }
 
 // Policy is the stored delivery policy of a project. A project without a row

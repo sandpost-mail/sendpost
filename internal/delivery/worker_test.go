@@ -8,6 +8,7 @@ import (
 	"github.com/emersion/go-smtp"
 
 	"github.com/sandpost-mail/sandpost/internal/delivery"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
 
@@ -219,7 +220,7 @@ func TestPasswordForAnotherSecretKeyIsNotUsed(t *testing.T) {
 	mid := e.capture("a@corp.example")
 
 	// A worker started with another SECRET_KEY (a rotated key) can not open the password.
-	other := delivery.NewWorker(e.pool, "ffffffffffffffffffffffffffffffff", &delivery.SMTPRelay{}, nil)
+	other := delivery.NewWorker(e.pool, secrets.NewBox(secrets.MustDeriveKeys("ffffffffffffffffffffffffffffffff").Transport), &delivery.SMTPRelay{}, nil)
 	if err := other.Process(e.ctx, e.auto(mid), false); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +409,7 @@ func TestWorkerLogsHoldNoSecrets(t *testing.T) {
 	e := newEnv(t, testutil.RelayOptions{User: "u", Pass: "relay-log-secret"})
 	var buf strings.Builder
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	worker := delivery.NewWorker(e.pool, testKey, &delivery.SMTPRelay{}, log)
+	worker := delivery.NewWorker(e.pool, secrets.NewBox(secrets.MustDeriveKeys(testKey).Transport), &delivery.SMTPRelay{}, log)
 
 	in := delivery.TransportInput{
 		Kind: delivery.KindSMTP, Host: e.relay.Host, Port: e.relay.Port, TLSMode: delivery.TLSStartTLS,

@@ -9,8 +9,10 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -35,9 +37,26 @@ const (
 	dialTimeout       = 15 * time.Second
 	commandTimeout    = 30 * time.Second
 	submissionTimeout = 2 * time.Minute
-	maxErrorRunes     = 300
-	localName         = "sandpost.local"
+	// checkTimeout bounds a whole connection test (dial, greeting, TLS, AUTH).
+	checkTimeout  = 45 * time.Second
+	maxErrorRunes = 300
+	localName     = "sandpost.local"
 )
+
+// Fixed phrases of the connection test.
+const (
+	// publicConnect is the only thing a failed connect stage reports: refused,
+	// filtered, closed and non-SMTP ports look the same, so the test is not a
+	// port scanner.
+	publicConnect = "could not reach an SMTP relay at this address"
+	publicDenied  = "the relay address is not allowed on this server"
+	// unknownOutcome prefixes a failure after the final dot: the relay may
+	// have queued the message, a retry can deliver it twice.
+	unknownOutcome = "outcome unknown after end of data: "
+)
+
+// errDeniedTarget is returned by the dialer for an address in DenyCIDRs.
+var errDeniedTarget = errors.New("the relay address is in a denied range")
 
 // RelayConfig is everything needed to reach a relay. It carries a password,
 // so it never formats itself with it.
@@ -84,8 +103,15 @@ func (e *RelayError) Error() string { return e.Stage + ": " + e.Text }
 
 // Public describes the failure without any text supplied by the remote host,
 // for the connection test: it must not turn Sandpost into a way to read
-// banners of arbitrary hosts and ports.
+// banners of arbitrary hosts and ports, nor tell refused, filtered and open
+// ports apart. Every connect stage failure reads the same.
 func (e *RelayError) Public() string {
+	if e.Stage == stageConnect {
+		if e.public == publicDenied {
+			return "connect failed: " + publicDenied
+		}
+		return "connect failed: " + publicConnect
+	}
 	s := e.Stage + " failed"
 	if e.public != "" {
 		s += ": " + e.public
@@ -131,6 +157,35 @@ type SMTPRelay struct {
 	// server name and a TLS 1.2 minimum are always set, certificates are
 	// always verified. Tests use it to trust their own authority.
 	TLSConfig *tls.Config
+	// DenyCIDRs lists address ranges the relay must never connect to (for
+	// example 127.0.0.0/8, 169.254.0.0/16 or the cluster network). It is
+	// checked on the resolved address of every connection, so a host name
+	// that resolves (or is rebound) into a denied range is refused too.
+	// Empty allows every address: relays on private networks are the
+	// common case.
+	DenyCIDRs []netip.Prefix
+}
+
+// control is the net.Dialer Control hook enforcing DenyCIDRs.
+func (r *SMTPRelay) control(_, address string, _ syscall.RawConn) error {
+	if len(r.DenyCIDRs) == 0 {
+		return nil
+	}
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return fmt.Errorf("%w: %q", errDeniedTarget, address) // fail closed
+	}
+	// A zoned address never matches a prefix, and an IPv4 address and its
+	// IPv4-mapped IPv6 form must match the same ranges: check the plain and
+	// the 16-byte form, without zone.
+	ip := ap.Addr().WithZone("").Unmap()
+	mapped := netip.AddrFrom16(ip.As16())
+	for _, p := range r.DenyCIDRs {
+		if p.Contains(ip) || p.Contains(mapped) {
+			return errDeniedTarget
+		}
+	}
+	return nil
 }
 
 var _ Relay = (*SMTPRelay)(nil)
@@ -192,7 +247,7 @@ func (r *SMTPRelay) Send(ctx context.Context, cfg RelayConfig, ob policy.Outboun
 	if count == 0 {
 		return results
 	}
-	if e := submit(c, ob.Data(), cfg.Password); e != nil {
+	if e := submit(c, ob, cfg.Password); e != nil {
 		for i := range results {
 			if accepted[i] {
 				results[i].Err = e
@@ -204,23 +259,39 @@ func (r *SMTPRelay) Send(ctx context.Context, cfg RelayConfig, ob policy.Outboun
 	return results
 }
 
-func submit(c *smtp.Client, data []byte, password string) *RelayError {
+func submit(c *smtp.Client, ob policy.Outbound, password string) *RelayError {
 	w, err := c.Data()
 	if err != nil {
 		return classify(stageData, err, password)
 	}
-	if _, err := w.Write(data); err != nil {
+	if _, err := ob.WriteTo(w); err != nil {
 		_ = w.Close()
 		return classify(stageData, err, password)
 	}
 	if err := w.Close(); err != nil {
-		return classify(stageData, err, password)
+		return endOfData(err, password)
 	}
 	return nil
 }
 
-// Check implements Relay.
+// endOfData classifies a failure after the final dot. A reply from the relay
+// is classified as usual. Anything else (connection lost, read timeout)
+// leaves the outcome unknown: the relay may have queued the message. It stays
+// transient, as for any MTA (RFC 5321 4.5.4.1, RFC 1047), so a blip does not
+// lose mail, but the text says a retry may deliver it twice.
+func endOfData(err error, password string) *RelayError {
+	re := classify(stageData, err, password)
+	var se *smtp.SMTPError
+	if !errors.As(err, &se) && !re.Permanent {
+		re.Text = cleanText(unknownOutcome+re.Text, password)
+	}
+	return re
+}
+
+// Check implements Relay. The whole test is bounded by checkTimeout.
 func (r *SMTPRelay) Check(ctx context.Context, cfg RelayConfig) CheckResult {
+	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
 	c, stop, rerr := r.open(ctx, cfg)
 	if rerr != nil {
 		return CheckResult{Error: rerr.Public()}
@@ -246,7 +317,7 @@ func (r *SMTPRelay) open(ctx context.Context, cfg RelayConfig) (*smtp.Client, fu
 		return nil, nil, &RelayError{Stage: stageTLS, Permanent: true, Text: "unknown TLS mode", public: "unknown TLS mode"}
 	}
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-	dialer := &net.Dialer{Timeout: dialTimeout}
+	dialer := &net.Dialer{Timeout: dialTimeout, Control: r.control}
 
 	var conn net.Conn
 	var err error
@@ -265,16 +336,16 @@ func (r *SMTPRelay) open(ctx context.Context, cfg RelayConfig) (*smtp.Client, fu
 	// Closing the connection is how a cancelled context interrupts a blocked read.
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 
-	var c *smtp.Client
 	if cfg.TLSMode == TLSStartTLS {
-		c, err = smtp.NewClientStartTLS(conn, r.tlsConfig(cfg.Host))
-		if err != nil {
+		tc, rerr := startTLS(ctx, conn, r.tlsConfig(cfg.Host), cfg.Password)
+		if rerr != nil {
 			stop()
-			return nil, nil, classify(stageTLS, err, cfg.Password)
+			_ = conn.Close()
+			return nil, nil, rerr
 		}
-	} else {
-		c = smtp.NewClient(conn)
+		conn = tc
 	}
+	c := smtp.NewClient(conn)
 	c.CommandTimeout, c.SubmissionTimeout = commandTimeout, submissionTimeout
 	if err := c.Hello(localName); err != nil {
 		stop()
@@ -340,10 +411,14 @@ func classify(stage string, err error, password string) *RelayError {
 			Stage: stage, Code: se.Code, Permanent: se.Code >= 500,
 			Text: cleanText(fmt.Sprintf("%d %s", se.Code, se.Message), password),
 		}
+	case errors.Is(err, errDeniedTarget):
+		return &RelayError{Stage: stageConnect, Permanent: true, Text: errDeniedTarget.Error(), public: publicDenied}
 	case isTLSError(err):
 		return &RelayError{Stage: stageTLS, Permanent: true, Text: cleanText(err.Error(), password), public: "certificate verification failed"}
-	case strings.Contains(err.Error(), "doesn't support STARTTLS"):
-		return &RelayError{Stage: stageTLS, Permanent: true, Text: "the relay does not offer STARTTLS", public: "the relay does not offer STARTTLS"}
+	case errors.Is(err, errNoStartTLS):
+		return &RelayError{Stage: stageTLS, Permanent: true, Text: errNoStartTLS.Error(), public: errNoStartTLS.Error()}
+	case errors.Is(err, errDataAfterStartTLS):
+		return &RelayError{Stage: stageTLS, Permanent: true, Text: errDataAfterStartTLS.Error(), public: "handshake failed"}
 	case stage == stageTLS:
 		return &RelayError{Stage: stage, Text: cleanText(err.Error(), password), public: "handshake failed"}
 	}

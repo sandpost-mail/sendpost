@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -313,30 +315,86 @@ func TestCheck(t *testing.T) {
 			t.Errorf("result %+v", res)
 		}
 	})
-	t.Run("connection refused", func(t *testing.T) {
+}
+
+// TestCheckConnectFailuresLookAlike pins that the connection test is not a
+// port scanner: refused, closed, silent, non-SMTP and rejecting ports all
+// report the same phrase, in every TLS mode.
+func TestCheckConnectFailuresLookAlike(t *testing.T) {
+	const want = "connect failed: could not reach an SMTP relay at this address"
+	refused := func(*testing.T) int {
 		ln, _ := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 		port := ln.Addr().(*net.TCPAddr).Port
 		_ = ln.Close()
-		res := (&delivery.SMTPRelay{}).Check(ctx(t), delivery.RelayConfig{Host: "127.0.0.1", Port: port, TLSMode: delivery.TLSNone})
-		if res.OK || res.Error != "connect failed" {
-			t.Errorf("a refused port must not leak details: %+v", res)
+		return port
+	}
+	tests := []struct {
+		name string
+		port func(t *testing.T) int
+	}{
+		{"refused", refused},
+		{"closed at once", func(t *testing.T) int { return scripted(t, func(net.Conn) {}) }},
+		{"silent", func(t *testing.T) int { return scripted(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) }) }},
+		{"not smtp", func(t *testing.T) int {
+			return scripted(t, func(c net.Conn) { _, _ = c.Write([]byte("HTTP/1.1 200 OK secret-internal-banner\r\n")) })
+		}},
+		{"smtp reject", func(t *testing.T) int {
+			return scripted(t, func(c net.Conn) { _, _ = c.Write([]byte("554 secret-internal-banner go away\r\n")) })
+		}},
+	}
+	for _, tc := range tests {
+		for _, mode := range []string{delivery.TLSNone, delivery.TLSStartTLS} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				cctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+				defer cancel()
+				res := (&delivery.SMTPRelay{}).Check(cctx, delivery.RelayConfig{Host: "127.0.0.1", Port: tc.port(t), TLSMode: mode})
+				if res.OK || res.Error != want {
+					t.Errorf("result %+v, want %q", res, want)
+				}
+			})
 		}
-	})
-	t.Run("not an smtp server", func(t *testing.T) {
-		ln, _ := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
-		t.Cleanup(func() { _ = ln.Close() })
-		go func() {
-			c, err := ln.Accept()
-			if err == nil {
-				_, _ = c.Write([]byte("HTTP/1.1 200 OK secret-internal-banner\r\n"))
-				_ = c.Close()
+	}
+}
+
+func TestDenyCIDRs(t *testing.T) {
+	relay := testutil.StartRelay(t, testutil.RelayOptions{})
+	tests := []struct {
+		name    string
+		host    string
+		deny    []string
+		blocked bool
+	}{
+		{"empty list allows everything", "127.0.0.1", nil, false},
+		{"other range allowed", "127.0.0.1", []string{"10.0.0.0/8"}, false},
+		{"loopback denied", "127.0.0.1", []string{"127.0.0.0/8"}, true},
+		{"host name resolved then denied", "localhost", []string{"127.0.0.0/8", "::1/128"}, true},
+		{"ipv4-mapped prefix", "127.0.0.1", []string{"::ffff:127.0.0.0/104"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &delivery.SMTPRelay{}
+			for _, s := range tc.deny {
+				r.DenyCIDRs = append(r.DenyCIDRs, netip.MustParsePrefix(s))
 			}
-		}()
-		res := (&delivery.SMTPRelay{}).Check(ctx(t), delivery.RelayConfig{Host: "127.0.0.1", Port: ln.Addr().(*net.TCPAddr).Port, TLSMode: delivery.TLSNone})
-		if res.OK || strings.Contains(res.Error, "banner") {
-			t.Errorf("remote text leaked: %+v", res)
-		}
-	})
+			cfg := delivery.RelayConfig{Host: tc.host, Port: relay.Port, TLSMode: delivery.TLSNone}
+			before := relay.Connections()
+			res := r.Send(ctx(t), cfg, outbound(t, "", "a@corp.example"))
+			check := r.Check(ctx(t), cfg)
+			if !tc.blocked {
+				if !res[0].Accepted() || !check.OK {
+					t.Fatalf("send %+v check %+v", res[0].Err, check)
+				}
+				return
+			}
+			assertPermanent(t, res[0], "denied")
+			if check.OK || check.Error != "connect failed: the relay address is not allowed on this server" {
+				t.Errorf("check %+v", check)
+			}
+			if relay.Connections() != before {
+				t.Error("a denied relay must not be contacted")
+			}
+		})
+	}
 }
 
 func TestRelayConfigDoesNotPrintPassword(t *testing.T) {

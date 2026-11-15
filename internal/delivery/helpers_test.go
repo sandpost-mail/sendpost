@@ -16,9 +16,11 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/delivery"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/messages"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
 
@@ -55,9 +57,9 @@ func newEnv(t *testing.T, relayOpts testutil.RelayOptions) *env {
 	queue := delivery.NewRiverQueue(jobs)
 	pid := testutil.Project(t, pool, "demo")
 	return &env{
-		t: t, ctx: context.Background(), pool: pool, relay: relayServer, pid: pid, scope: authz.Trusted(pid),
-		svc:    delivery.NewService(pool, testKey, client, queue),
-		worker: delivery.NewWorker(pool, testKey, client, log),
+		t: t, ctx: context.Background(), pool: pool, relay: relayServer, pid: pid, scope: authztest.Scope(pid),
+		svc:    delivery.NewService(pool, secrets.NewBox(secrets.MustDeriveKeys(testKey).Transport), client, queue),
+		worker: delivery.NewWorker(pool, secrets.NewBox(secrets.MustDeriveKeys(testKey).Transport), client, log),
 		queue:  queue, jobs: jobs,
 		ing: ingest.NewService(pool).WithHook(delivery.NewEnqueuer(queue), log),
 	}
@@ -196,7 +198,7 @@ func mustErrIs(t *testing.T, err, target error) {
 
 var messagesErrNotFound = messages.ErrNotFound
 
-func authzTrusted(pid int64) authz.Scope { return authz.Trusted(pid) }
+func authzTrusted(pid int64) authz.Scope { return authztest.Scope(pid) }
 
 // releaseJobs returns only the manual release jobs.
 func (e *env) releaseJobs() []delivery.DeliverArgs {

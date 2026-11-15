@@ -3,6 +3,7 @@ package policy
 import (
 	"bytes"
 	"mime"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -19,27 +20,48 @@ type headerEdit struct {
 	originalTo, originalCc []string
 }
 
-// Headers always removed from outbound mail: Bcc must not reveal blind
-// recipients, and X-Original-* are ours, a sender must not be able to forge
-// them.
-var strippedHeaders = map[string]bool{
-	"bcc":           true,
-	"x-original-to": true, "x-original-cc": true, "x-original-bcc": true,
+// stripped reports the headers always removed from outbound mail: Bcc and
+// Resent-Bcc must not reveal blind recipients, and every X-Original-* is
+// ours, a sender must not be able to forge any of them.
+func stripped(name string) bool {
+	return name == "bcc" || name == "resent-bcc" || strings.HasPrefix(name, "x-original-")
 }
 
-// rewriteHeaders strips Bcc and any X-Original-* headers, optionally prefixes
-// the subject and adds X-Original-To and X-Original-Cc. It returns a new slice.
-func rewriteHeaders(raw []byte, e headerEdit) []byte {
-	head, sep, body := splitMessage(raw)
-	eol := lineEnding(head)
-	fields := splitFields(head)
+// Header layout limits (RFC 5322 2.1.1). Generated lines are folded at
+// foldLimit; maxOriginalAddrs bounds the addresses listed in one
+// X-Original-* header, the rest are summarised in a comment.
+const (
+	foldLimit        = 78
+	maxOriginalAddrs = 50
+)
 
+// parsedMessage is a message split once into header fields and body, so an
+// evaluation that writes several copies parses its input only once.
+type parsedMessage struct {
+	fields []string
+	sep    string
+	eol    string
+	body   []byte
+	size   int
+}
+
+func parseMessage(raw []byte) parsedMessage {
+	head, sep, body := splitMessage(raw)
+	return parsedMessage{fields: splitFields(head), sep: sep, eol: lineEnding(head), body: body, size: len(raw)}
+}
+
+// rewriteHeaders strips Bcc, Resent-Bcc and any X-Original-* headers,
+// optionally prefixes the subject and adds X-Original-To and X-Original-Cc.
+// It returns a new slice.
+func rewriteHeaders(raw []byte, e headerEdit) []byte { return parseMessage(raw).rewrite(e) }
+
+func (m parsedMessage) rewrite(e headerEdit) []byte {
 	var out bytes.Buffer
-	out.Grow(len(raw) + 256)
+	out.Grow(m.size + 256)
 	subjectDone := false
-	for _, f := range fields {
+	for _, f := range m.fields {
 		name, ok := fieldName(f)
-		if ok && strippedHeaders[name] {
+		if ok && stripped(name) {
 			continue
 		}
 		if ok && name == "subject" && !subjectDone && e.subjectPrefix != "" {
@@ -50,15 +72,16 @@ func rewriteHeaders(raw []byte, e headerEdit) []byte {
 		out.WriteString(f)
 	}
 	if e.subjectPrefix != "" && !subjectDone {
-		out.WriteString("Subject: " + encodePrefix(e.subjectPrefix) + eol)
+		out.WriteString(prefixSubject("Subject:"+m.eol, e.subjectPrefix))
 	}
-	writeOriginal(&out, "X-Original-To", e.originalTo, eol)
-	writeOriginal(&out, "X-Original-Cc", e.originalCc, eol)
+	writeOriginal(&out, "X-Original-To", e.originalTo, m.eol)
+	writeOriginal(&out, "X-Original-Cc", e.originalCc, m.eol)
+	sep := m.sep
 	if sep == "" {
-		sep = eol // a message that is only headers still needs the blank line
+		sep = m.eol // a message that is only headers still needs the blank line
 	}
 	out.WriteString(sep)
-	out.Write(body)
+	out.Write(m.body)
 	return out.Bytes()
 }
 
@@ -98,6 +121,9 @@ func splitFields(head []byte) []string {
 		}
 		if !strings.HasSuffix(line, "\n") {
 			line += lineEnding(head)
+			if line == "\r\n" || line == "\n" {
+				continue // a lone trailing CR would turn into the body separator
+			}
 		}
 		if (line[0] == ' ' || line[0] == '\t') && cur.Len() > 0 {
 			cur.WriteString(line)
@@ -134,6 +160,9 @@ func fieldName(f string) (string, bool) {
 	return strings.ToLower(name), true
 }
 
+// prefixSubject writes the subject with the prefix in front, folded so that
+// no generated line passes foldLimit. The original text follows unchanged, on
+// a continuation line when it does not fit on the last generated one.
 func prefixSubject(field, prefix string) string {
 	i := strings.IndexByte(field, ':')
 	rest := strings.TrimLeft(field[i+1:], " \t")
@@ -141,30 +170,70 @@ func prefixSubject(field, prefix string) string {
 	if strings.HasSuffix(field, "\r\n") {
 		eol = "\r\n"
 	}
+	head, last := foldWords("Subject:", strings.Split(encodePrefix(prefix), " "), eol)
 	if strings.TrimSpace(rest) == "" {
-		return "Subject: " + encodePrefix(prefix) + eol
+		return head + eol
 	}
-	return "Subject: " + encodePrefix(prefix) + " " + rest
+	first, _, _ := strings.Cut(rest, "\n")
+	if last+1+len(strings.TrimRight(first, "\r")) > foldLimit {
+		return head + eol + " " + rest
+	}
+	return head + " " + rest
 }
 
 // encodePrefix returns the prefix as header text: ASCII stays as it is, other
-// text becomes an RFC 2047 encoded word. The prefix never holds control
-// characters (validated before), so it can not end the header.
+// text becomes RFC 2047 encoded words of at most 75 characters each. The
+// prefix never holds control characters (validated before), so it can not end
+// the header.
 func encodePrefix(p string) string {
 	return mime.QEncoding.Encode("utf-8", strings.TrimSpace(p))
 }
 
+// foldWords writes name followed by the words, each after one space, and
+// starts a continuation line before a word that would pass foldLimit. It
+// returns the text without a final line ending and the length of its last
+// line.
+func foldWords(name string, words []string, eol string) (string, int) {
+	var b strings.Builder
+	b.WriteString(name)
+	line := len(name)
+	for _, w := range words {
+		// A word longer than a whole line stays alone on its line.
+		if line > 0 && line+1+len(w) > foldLimit {
+			b.WriteString(eol)
+			line = 0
+		}
+		b.WriteByte(' ')
+		b.WriteString(w)
+		line += 1 + len(w)
+	}
+	return b.String(), line
+}
+
 func writeOriginal(out *bytes.Buffer, name string, addrs []string, eol string) {
-	clean := make([]string, 0, len(addrs))
+	words := make([]string, 0, min(len(addrs), maxOriginalAddrs)+2)
+	more := 0
 	for _, a := range addrs {
-		if c, ok := infoAddress(a); ok {
-			clean = append(clean, c)
+		c, ok := infoAddress(a)
+		switch {
+		case !ok:
+		case len(words) < maxOriginalAddrs:
+			words = append(words, c)
+		default:
+			more++
 		}
 	}
-	if len(clean) == 0 {
+	if len(words) == 0 {
 		return
 	}
-	out.WriteString(name + ": " + strings.Join(clean, ", ") + eol)
+	for i := range words[:len(words)-1] {
+		words[i] += ","
+	}
+	if more > 0 {
+		words = append(words, "("+strconv.Itoa(more), "more)")
+	}
+	text, _ := foldWords(name+":", words, eol)
+	out.WriteString(text + eol)
 }
 
 // infoAddress returns a recipient for an X-Original-* header, or false when
