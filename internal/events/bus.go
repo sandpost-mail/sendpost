@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -35,15 +36,42 @@ type Subscription struct {
 }
 
 // Ready is closed once the bus is LISTENing for the project, so events
-// published afterwards are guaranteed to be delivered.
+// published afterwards are guaranteed to be delivered. A subscription made
+// while the bus connection is down gets a channel that closes only after the
+// bus has reconnected and LISTENs again. A subscription that was already
+// ready when the connection dropped keeps its closed channel and receives a
+// resync event after the reconnect instead.
 func (s *Subscription) Ready() <-chan struct{} { return s.ready }
 
 // Close ends the subscription. It is safe to call more than once.
 func (s *Subscription) Close() { s.bus.unsubscribe(s) }
 
+// listenConn is the part of a dedicated Postgres connection the bus needs.
+type listenConn interface {
+	Exec(ctx context.Context, sql string) error
+	WaitForNotification(ctx context.Context) (*pgconn.Notification, error)
+	Close(ctx context.Context) error
+}
+
+// dialFunc opens a new listenConn.
+type dialFunc func(ctx context.Context) (listenConn, error)
+
+type pgxListenConn struct{ conn *pgx.Conn }
+
+func (c pgxListenConn) Exec(ctx context.Context, sql string) error {
+	_, err := c.conn.Exec(ctx, sql)
+	return err
+}
+
+func (c pgxListenConn) WaitForNotification(ctx context.Context) (*pgconn.Notification, error) {
+	return c.conn.WaitForNotification(ctx)
+}
+
+func (c pgxListenConn) Close(ctx context.Context) error { return c.conn.Close(ctx) }
+
 // Bus listens on Postgres and fans events out to local subscribers.
 type Bus struct {
-	dsn  string
+	dial dialFunc
 	log  *slog.Logger
 	kick chan struct{}
 
@@ -52,9 +80,23 @@ type Bus struct {
 }
 
 // NewBus returns a Bus that opens its own dedicated connection from dsn.
+// A nil log discards the bus warnings.
 func NewBus(dsn string, log *slog.Logger) *Bus {
+	return newBus(func(ctx context.Context) (listenConn, error) {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err != nil {
+			return nil, err
+		}
+		return pgxListenConn{conn: conn}, nil
+	}, log)
+}
+
+func newBus(dial dialFunc, log *slog.Logger) *Bus {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	return &Bus{
-		dsn:      dsn,
+		dial:     dial,
 		log:      log,
 		kick:     make(chan struct{}, 1),
 		projects: make(map[int64]*projectState),
@@ -105,6 +147,8 @@ func (b *Bus) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
 		err := b.session(ctx, !first, func() { backoff = minBackoff })
 		first = false
+		// Nothing is LISTENed until the next session reconciles.
+		b.resetReady()
 		if ctx.Err() != nil {
 			break
 		}
@@ -120,7 +164,7 @@ func (b *Bus) Run(ctx context.Context) error {
 
 // session runs one connection until it fails or ctx ends.
 func (b *Bus) session(ctx context.Context, resync bool, connected func()) error {
-	conn, err := pgx.Connect(ctx, b.dsn)
+	conn, err := b.dial(ctx)
 	if err != nil {
 		return err
 	}
@@ -162,7 +206,7 @@ func (b *Bus) session(ctx context.Context, resync bool, connected func()) error 
 }
 
 // reconcile makes the LISTEN set match the subscribed projects.
-func (b *Bus) reconcile(ctx context.Context, conn *pgx.Conn, listening map[int64]*projectState) error {
+func (b *Bus) reconcile(ctx context.Context, conn listenConn, listening map[int64]*projectState) error {
 	b.mu.Lock()
 	want := make(map[int64]*projectState, len(b.projects))
 	for pid, st := range b.projects {
@@ -172,7 +216,7 @@ func (b *Bus) reconcile(ctx context.Context, conn *pgx.Conn, listening map[int64
 
 	for pid := range listening {
 		if _, ok := want[pid]; !ok {
-			if _, err := conn.Exec(ctx, "UNLISTEN "+pgx.Identifier{Channel(pid)}.Sanitize()); err != nil {
+			if err := conn.Exec(ctx, "UNLISTEN "+pgx.Identifier{Channel(pid)}.Sanitize()); err != nil {
 				return err
 			}
 			delete(listening, pid)
@@ -187,13 +231,29 @@ func (b *Bus) reconcile(ctx context.Context, conn *pgx.Conn, listening map[int64
 			}
 			continue
 		}
-		if _, err := conn.Exec(ctx, "LISTEN "+pgx.Identifier{Channel(pid)}.Sanitize()); err != nil {
+		if err := conn.Exec(ctx, "LISTEN "+pgx.Identifier{Channel(pid)}.Sanitize()); err != nil {
 			return err
 		}
 		listening[pid] = st
 		b.markReady(pid, st)
 	}
 	return nil
+}
+
+// resetReady re-arms the readiness of every project whose LISTEN was live,
+// so subscriptions made while disconnected wait for the next session.
+// Subscriptions already holding the closed channel are told to resync by the
+// next session instead.
+func (b *Bus) resetReady() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, st := range b.projects {
+		select {
+		case <-st.ready:
+			st.ready = make(chan struct{})
+		default:
+		}
+	}
 }
 
 func (b *Bus) markReady(pid int64, st *projectState) {
@@ -232,8 +292,6 @@ func (b *Bus) broadcastAll(ev Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, st := range b.projects {
-		// The listen state is rebuilt on the new connection.
-		st.ready = make(chan struct{})
 		for sub := range st.subs {
 			deliver(sub, ev)
 		}

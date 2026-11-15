@@ -42,6 +42,10 @@ func TestCodes(t *testing.T) {
 		{"urls only", "https://x.test/a/123456/b", nil, ""},
 		{"too long digit run", "ref 1234567890123", nil, ""},
 		{"empty", "", nil, ""},
+		{"adjacent bare codes", "Codes: 111111 222222 333333", []string{"111111", "222222", "333333"}, extract.KindDigits},
+		{"two bare codes", "123456 654321", []string{"123456", "654321"}, extract.KindDigits},
+		{"bare code after phone prefix", "+123456 or 654321+", []string{"654321"}, extract.KindDigits},
+		{"seven digit run is not a code", "1234567 and 7654321", nil, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,6 +78,11 @@ func TestCustomPattern(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(vals(got), []string{"1234", "9999"}) {
 		t.Fatalf("group 1: %v %v", got, err)
 	}
+	// Group 1 is the code, even when later groups exist.
+	got, err = extract.Codes("code: 4242 (expires) code: 5151", `code: (\d+)( \(expires\))?`)
+	if err != nil || !reflect.DeepEqual(vals(got), []string{"4242", "5151"}) {
+		t.Fatalf("group 1 with optional group 2: %v %v", vals(got), err)
+	}
 	got, _ = extract.Codes("code 123456", `nomatch`)
 	if len(got) != 0 {
 		t.Fatalf("custom pattern replaces the heuristics: %v", got)
@@ -100,6 +109,21 @@ func TestLimits(t *testing.T) {
 	got, _ := extract.Codes(b.String(), "")
 	if len(got) != extract.MaxCodes {
 		t.Errorf("got %d codes, want cap %d", len(got), extract.MaxCodes)
+	}
+	// A pattern matching the empty string everywhere still stops at the cap.
+	got, err := extract.Codes(strings.Repeat("ab", 100<<10), `x*`)
+	if err != nil || len(got) != 0 {
+		t.Errorf("empty matches: %v %v", got, err)
+	}
+	// Distinct codes past many duplicates are still found up to MaxCodes.
+	b.Reset()
+	b.WriteString(strings.Repeat("A1 ", 500))
+	for i := 0; i < 30; i++ {
+		b.WriteString("B" + strings.Repeat("0", 3) + string(rune('0'+i/10)) + string(rune('0'+i%10)) + " ")
+	}
+	got, _ = extract.Codes(b.String(), `[A-Z]\d+`)
+	if len(got) != extract.MaxCodes {
+		t.Errorf("got %d codes past duplicates, want %d", len(got), extract.MaxCodes)
 	}
 	// Text beyond the scan window is ignored, and a huge input stays fast.
 	got, _ = extract.Codes(strings.Repeat("x", 300<<10)+" code 123456", "")

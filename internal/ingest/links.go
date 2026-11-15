@@ -7,7 +7,11 @@ import (
 	"golang.org/x/net/html"
 )
 
-const maxLinks = 500
+const (
+	maxLinks = 500
+	// urlScanFactor bounds the bare URLs scanned per remaining link slot.
+	urlScanFactor = 8
+)
 
 var bareURL = regexp.MustCompile(`(?i)\bhttps?://[^\s<>"'\x60]+`)
 
@@ -27,13 +31,22 @@ func ExtractLinks(htmlBody, text string) []string {
 		seen[u] = struct{}{}
 		out = append(out, u)
 	}
-	for _, u := range anchorHrefs(htmlBody) {
+	eachAnchorHref(htmlBody, func(u string) bool {
 		if linkScheme(u) {
 			add(u)
 		}
+		return len(out) < maxLinks
+	})
+	if len(out) >= maxLinks {
+		return out
 	}
-	for _, m := range bareURL.FindAllString(text, -1) {
+	// Duplicates are common, so scan a bounded multiple of the remaining
+	// budget instead of every URL of a possibly huge text body.
+	for _, m := range bareURL.FindAllString(text, (maxLinks-len(out))*urlScanFactor) {
 		add(trimURLPunctuation(m))
+		if len(out) >= maxLinks {
+			break
+		}
 	}
 	return out
 }
@@ -43,24 +56,28 @@ func linkScheme(u string) bool {
 	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "mailto:")
 }
 
-func anchorHrefs(body string) []string {
+// eachAnchorHref calls yield with the href of every a and area tag of body, in
+// order, until yield returns false. It reads tag names and attributes without
+// building tokens, so tags that are not anchors cost no allocation.
+func eachAnchorHref(body string, yield func(href string) bool) {
 	if body == "" {
-		return nil
+		return
 	}
-	var out []string
 	z := html.NewTokenizer(strings.NewReader(body))
 	for {
 		switch z.Next() {
 		case html.ErrorToken:
-			return out
+			return
 		case html.StartTagToken, html.SelfClosingTagToken:
-			tok := z.Token()
-			if tok.Data != "a" && tok.Data != "area" {
+			name, hasAttr := z.TagName()
+			if !hasAttr || (string(name) != "a" && string(name) != "area") {
 				continue
 			}
-			for _, a := range tok.Attr {
-				if a.Key == "href" {
-					out = append(out, a.Val)
+			for more := true; more; {
+				var key, val []byte
+				key, val, more = z.TagAttr()
+				if string(key) == "href" && !yield(string(val)) {
+					return
 				}
 			}
 		}

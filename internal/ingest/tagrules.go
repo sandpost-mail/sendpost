@@ -14,6 +14,9 @@ const (
 const (
 	maxTagRunes      = 100
 	valuePlaceholder = "{value}"
+	// maxTagsPerMessage bounds the tags one message can get, so a "{value}"
+	// rule over a header repeated many times cannot create tags in bulk.
+	maxTagsPerMessage = 50
 )
 
 // Rule is a tag rule as stored per project.
@@ -31,10 +34,14 @@ type Rule struct {
 // matching Pattern, an empty Pattern matches any value. A recipient rule matches
 // when any recipient address matches Pattern. Patterns are case insensitive and
 // '*' matches any run of characters. In a header rule, "{value}" in Tag is
-// replaced by the matched header value.
+// replaced by the matched header value. At most maxTagsPerMessage tags are
+// returned: the first ones produced, in rule order.
 func ApplyRules(rules []Rule, headers map[string][]string, recipients []Recipient) []string {
 	set := map[string]struct{}{}
 	add := func(tag string) {
+		if len(set) >= maxTagsPerMessage {
+			return
+		}
 		if tag = normalizeTag(tag); tag != "" {
 			set[tag] = struct{}{}
 		}

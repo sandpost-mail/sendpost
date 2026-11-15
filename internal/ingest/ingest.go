@@ -1,6 +1,10 @@
 // Package ingest turns a raw SMTP message into stored rows: it parses the
 // MIME structure, inserts everything in one transaction, applies the project's
 // tag rules and publishes a LISTEN/NOTIFY event on commit.
+//
+// Text fields are made storable (valid UTF-8, no NUL bytes, bounded sizes)
+// but HTML is never sanitized here: it is stored as received and the API is
+// responsible for serving it under a sandboxing Content-Security-Policy.
 package ingest
 
 import (
@@ -67,30 +71,40 @@ func (s *Service) WithHook(h Hook, log *slog.Logger) *Service {
 	return &c
 }
 
-// runHook calls the hook in a savepoint. Nothing it does or fails at can
-// affect the capture.
-func (s *Service) runHook(ctx context.Context, tx pgx.Tx, projectID, messageID int64) {
-	if s.hook == nil {
-		return
+// errHookTxUnusable reports that the hook savepoint could not be rolled back
+// or released, which leaves the ingest transaction unusable.
+var errHookTxUnusable = errors.New("hook savepoint could not be rolled back or released")
+
+// runHook calls h in a savepoint. A hook failure is logged and rolled back,
+// it never affects the capture. It returns an error wrapping
+// errHookTxUnusable only when the savepoint itself cannot be rolled back or
+// released, because the transaction is then aborted.
+func (s *Service) runHook(ctx context.Context, tx pgx.Tx, h Hook, projectID, messageID int64) error {
+	if h == nil {
+		return nil
 	}
 	sp, err := tx.Begin(ctx)
 	if err != nil {
-		s.log.Error("ingest hook: savepoint", "project_id", projectID, "message_id", messageID, "error", err)
-		return
+		return fmt.Errorf("%w: savepoint: %w", errHookTxUnusable, err)
 	}
-	if err := s.hook.AfterInsert(ctx, sp, projectID, messageID); err != nil {
-		_ = sp.Rollback(context.WithoutCancel(ctx))
+	if err := h.AfterInsert(ctx, sp, projectID, messageID); err != nil {
+		if rbErr := sp.Rollback(context.WithoutCancel(ctx)); rbErr != nil {
+			return fmt.Errorf("%w: hook: %w", errHookTxUnusable, errors.Join(err, fmt.Errorf("rollback savepoint: %w", rbErr)))
+		}
 		s.log.Error("ingest hook failed, the message is stored without its delivery job",
 			"project_id", projectID, "message_id", messageID, "error", err)
-		return
+		return nil
 	}
 	if err := sp.Commit(ctx); err != nil {
-		s.log.Error("ingest hook: release savepoint", "project_id", projectID, "message_id", messageID, "error", err)
+		return fmt.Errorf("%w: release savepoint: %w", errHookTxUnusable, err)
 	}
+	return nil
 }
 
 // Ingest parses and stores a message and returns its id. Parsing never fails,
-// so a message that arrives is always captured.
+// so a message that arrives is always captured. When the hook leaves the
+// transaction unusable, the capture is retried once without the hook, as the
+// Hook contract says a hook never fails the capture.
 func (s *Service) Ingest(ctx context.Context, in Input) (int64, error) {
 	if in.Raw == nil {
 		in.Raw = []byte{} // the column is NOT NULL
@@ -100,7 +114,18 @@ func (s *Service) Ingest(ctx context.Context, in Input) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("encode headers: %w", err)
 	}
+	id, err := s.store(ctx, in, parsed, headers, s.hook)
+	if errors.Is(err, errHookTxUnusable) {
+		s.log.Error("ingest hook left the transaction unusable, storing the message without its delivery job",
+			"project_id", in.ProjectID, "error", err)
+		id, err = s.store(ctx, in, parsed, headers, nil)
+	}
+	return id, err
+}
 
+// store runs one ingest transaction. The deferred rollback also runs when a
+// hook panics, with a context that outlives a cancelled request.
+func (s *Service) store(ctx context.Context, in Input, parsed Parsed, headers []byte, h Hook) (int64, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin: %w", err)
@@ -132,7 +157,9 @@ func (s *Service) Ingest(ctx context.Context, in Input) (int64, error) {
 	if err := applyTagRules(ctx, q, in.ProjectID, row.ID, parsed); err != nil {
 		return 0, err
 	}
-	s.runHook(ctx, tx, in.ProjectID, row.ID)
+	if err := s.runHook(ctx, tx, h, in.ProjectID, row.ID); err != nil {
+		return 0, err
+	}
 	ev := events.Event{Type: events.TypeMessageCreated, MessageID: row.ID}
 	if err := events.Notify(ctx, tx, in.ProjectID, ev); err != nil {
 		return 0, err

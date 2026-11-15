@@ -18,6 +18,9 @@ const (
 	maxAddressRunes  = 1000
 	maxFilenameRunes = 500
 	maxHeaderCount   = 2000
+	// maxValuesPerHeader bounds the values kept for one header name, so a
+	// header repeated many times cannot bloat the headers column.
+	maxValuesPerHeader = 100
 )
 
 // Recipient kinds stored in message_recipients.
@@ -58,20 +61,34 @@ type Parsed struct {
 	Links       []string
 }
 
-var parser = enmime.NewParser(
+var parserOptions = []enmime.Option{
 	enmime.MaxMIMEParts(maxParsedParts),
 	enmime.SetReadPartErrorPolicy(enmime.AllowCorruptTextPartErrorPolicy),
 	enmime.SkipMalformedParts(true),
+}
+
+var (
+	parser = enmime.NewParser(parserOptions...)
+	// attachmentParser classifies parts exactly like parser but skips the
+	// HTML to text down conversion, which attachment downloads never use.
+	// enmime decodes every part while reading the tree, so the full MIME
+	// parse itself cannot be avoided without storing offsets at ingest.
+	attachmentParser = enmime.NewParser(append(parserOptions[:len(parserOptions):len(parserOptions)],
+		enmime.DisableTextConversion(true))...)
 )
 
 // parseEnvelope runs enmime and returns the envelope, or nil when the message
 // cannot be parsed at all.
 func parseEnvelope(raw []byte) *enmime.Envelope {
-	root, err := parser.ReadParts(bytes.NewReader(raw))
+	return parseEnvelopeWith(parser, raw)
+}
+
+func parseEnvelopeWith(ep *enmime.Parser, raw []byte) *enmime.Envelope {
+	root, err := ep.ReadParts(bytes.NewReader(raw))
 	if err != nil || root == nil {
 		return nil
 	}
-	env, err := parser.EnvelopeFromPart(root)
+	env, err := ep.EnvelopeFromPart(root)
 	if err != nil {
 		return nil
 	}
@@ -128,6 +145,9 @@ func collectHeaders(env *enmime.Envelope) map[string][]string {
 	out := make(map[string][]string, len(keys))
 	for _, k := range keys {
 		vals := env.GetHeaderValues(k)
+		if len(vals) > maxValuesPerHeader {
+			vals = vals[:maxValuesPerHeader]
+		}
 		cleaned := make([]string, 0, len(vals))
 		for _, v := range vals {
 			cleaned = append(cleaned, truncateBytes(clean(v), maxHeaderValue))
@@ -197,16 +217,22 @@ func collectAttachments(env *enmime.Envelope) []Attachment {
 	parts := attachmentParts(env)
 	out := make([]Attachment, 0, len(parts))
 	for i, part := range parts {
-		out = append(out, Attachment{
-			Ordinal:     i,
-			Filename:    truncateRunes(clean(part.FileName), maxFilenameRunes),
-			ContentType: truncateRunes(clean(part.ContentType), maxAddressRunes),
-			Size:        int64(len(part.Content)),
-			ContentID:   strings.Trim(clean(part.ContentID), "<> "),
-			Inline:      i >= len(env.Attachments),
-		})
+		out = append(out, attachmentMeta(part, i, len(env.Attachments)))
 	}
 	return out
+}
+
+// attachmentMeta describes part, found at ordinal among the attachments
+// followed by the inlines (nAttachments of the former).
+func attachmentMeta(part *enmime.Part, ordinal, nAttachments int) Attachment {
+	return Attachment{
+		Ordinal:     ordinal,
+		Filename:    truncateRunes(clean(part.FileName), maxFilenameRunes),
+		ContentType: truncateRunes(clean(part.ContentType), maxAddressRunes),
+		Size:        int64(len(part.Content)),
+		ContentID:   strings.Trim(clean(part.ContentID), "<> "),
+		Inline:      ordinal >= nAttachments,
+	}
 }
 
 func truncateBytes(s string, n int) string {
@@ -219,7 +245,7 @@ func truncateBytes(s string, n int) string {
 // AttachmentContent re-parses raw and returns the attachment with the given
 // ordinal and its decoded bytes. ok is false when there is no such attachment.
 func AttachmentContent(raw []byte, ordinal int) (a Attachment, content []byte, ok bool) {
-	env := parseEnvelope(raw)
+	env := parseEnvelopeWith(attachmentParser, raw)
 	if env == nil {
 		return Attachment{}, nil, false
 	}
@@ -227,15 +253,14 @@ func AttachmentContent(raw []byte, ordinal int) (a Attachment, content []byte, o
 	if ordinal < 0 || ordinal >= len(parts) {
 		return Attachment{}, nil, false
 	}
-	metas := collectAttachments(env)
-	return metas[ordinal], parts[ordinal].Content, true
+	return attachmentMeta(parts[ordinal], ordinal, len(env.Attachments)), parts[ordinal].Content, true
 }
 
 // AttachmentBytes re-parses raw and returns the decoded bytes of every
 // attachment, indexed by Attachment.Ordinal. It returns nil when raw cannot be
 // parsed.
 func AttachmentBytes(raw []byte) [][]byte {
-	env := parseEnvelope(raw)
+	env := parseEnvelopeWith(attachmentParser, raw)
 	if env == nil {
 		return nil
 	}

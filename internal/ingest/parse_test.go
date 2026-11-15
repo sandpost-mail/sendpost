@@ -183,3 +183,57 @@ func TestParseManyParts(t *testing.T) {
 }
 
 func validUTF8(s string) bool { return strings.ToValidUTF8(s, "") == s }
+
+func TestParseCapsValuesPerHeader(t *testing.T) {
+	var b strings.Builder
+	for range maxValuesPerHeader * 3 {
+		b.WriteString("X-Tag: v\r\n")
+	}
+	b.WriteString("Subject: s\r\n\r\nbody")
+	p := Parse([]byte(b.String()), "", nil)
+	if got := len(p.Headers["X-Tag"]); got != maxValuesPerHeader {
+		t.Fatalf("values %d want %d", got, maxValuesPerHeader)
+	}
+}
+
+// htmlOnlyWithAttachment has no text/plain part, so Parse down converts the
+// HTML while attachment downloads skip that work.
+const htmlOnlyWithAttachment = "From: a@x.test\r\nSubject: h\r\nMIME-Version: 1.0\r\n" +
+	"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+	"--B\r\nContent-Type: text/html\r\n\r\n<p>Hi <a href=\"https://x.test\">x</a></p>\r\n" +
+	"--B\r\nContent-Type: text/csv\r\nContent-Disposition: attachment; filename=\"a.csv\"\r\n\r\na,b\r\n1,2\r\n" +
+	"--B--\r\n"
+
+func TestAttachmentContentMatchesParse(t *testing.T) {
+	inputs := map[string][]byte{"html_only_with_attachment": []byte(htmlOnlyWithAttachment)}
+	entries, err := os.ReadDir("testdata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			inputs[e.Name()] = fixture(t, e.Name())
+		}
+	}
+	for name, raw := range inputs {
+		t.Run(name, func(t *testing.T) {
+			want := Parse(raw, "", nil).Attachments
+			all := AttachmentBytes(raw)
+			if len(all) != len(want) {
+				t.Fatalf("AttachmentBytes %d parts, Parse %d", len(all), len(want))
+			}
+			for i, meta := range want {
+				a, content, ok := AttachmentContent(raw, i)
+				if !ok || a != meta || int64(len(content)) != meta.Size || string(content) != string(all[i]) {
+					t.Errorf("ordinal %d: %+v ok=%v want %+v", i, a, ok, meta)
+				}
+			}
+			if _, _, ok := AttachmentContent(raw, len(want)); ok {
+				t.Error("ordinal past the end must not be found")
+			}
+		})
+	}
+	if got := Parse([]byte(htmlOnlyWithAttachment), "", nil); !strings.Contains(got.Text, "Hi") || len(got.Attachments) != 1 {
+		t.Fatalf("fixture sanity: %+v", got)
+	}
+}

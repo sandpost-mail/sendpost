@@ -1,5 +1,9 @@
 package ingest
 
+// This file makes derived text safe to store in Postgres. It does not
+// sanitize HTML: bodies are stored verbatim and the API renders them only
+// under a sandboxing Content-Security-Policy.
+
 import "strings"
 
 const replacementRune = "�"

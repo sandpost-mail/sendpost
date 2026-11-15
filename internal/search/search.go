@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // MaxQueryLength bounds the accepted query size in bytes.
@@ -113,7 +114,8 @@ func (t token) freeText() string {
 	return t.text
 }
 
-// tokenize splits on whitespace, keeping double quoted runs together. A quote
+// tokenize splits on Unicode whitespace (so a form feed or a no-break
+// space is a separator, not a free text term), keeping double quoted runs together. A quote
 // directly after "key:" belongs to the value. An unterminated quote runs to the end.
 func tokenize(s string) []token {
 	var out []token
@@ -131,7 +133,7 @@ func tokenize(s string) []token {
 		case r == '"':
 			inQuote = !inQuote
 			quoted = true
-		case !inQuote && (r == ' ' || r == '\t' || r == '\n' || r == '\r'):
+		case !inQuote && unicode.IsSpace(r):
 			flush()
 		default:
 			cur.WriteRune(r)
