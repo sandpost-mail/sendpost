@@ -6,12 +6,15 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
+	"github.com/sandpost-mail/sandpost/internal/ratelimit"
 )
 
 var (
@@ -28,6 +31,9 @@ var (
 	errStoreTemporary = &smtp.SMTPError{
 		Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "Temporary failure storing the message",
 	}
+	errServerBusy = &smtp.SMTPError{
+		Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 2}, Message: "Server busy, try again later",
+	}
 	errProjectGone = &smtp.SMTPError{
 		Code: 554, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "Project no longer exists",
 	}
@@ -36,13 +42,21 @@ var (
 type backend struct {
 	verifier Verifier
 	ingester Ingester
-	limiter  *FailureLimiter
+	limiter  *ratelimit.Limiter
 	log      *slog.Logger
+	// base is the server lifetime context, see Server.Serve.
+	base context.Context
+	// dataMem bounds the bytes held by messages being received, each DATA
+	// reserves maxMessage bytes.
+	dataMem    *semaphore.Weighted
+	maxMessage int64
+	dataWait   time.Duration
 }
 
 // NewSession implements smtp.Backend.
 func (b *backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
-	return &session{b: b, ip: remoteIP(c.Conn().RemoteAddr())}, nil
+	ip := remoteIP(c.Conn().RemoteAddr())
+	return &session{b: b, ip: ip, limitKey: ratelimit.Key(ip)}, nil
 }
 
 func remoteIP(a net.Addr) string {
@@ -60,6 +74,8 @@ func remoteIP(a net.Addr) string {
 type session struct {
 	b  *backend
 	ip string
+	// limitKey groups IPv6 clients by /64 for the failure limiter.
+	limitKey string
 
 	identity *credentials.Identity
 	from     string
@@ -85,24 +101,28 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 }
 
 func (s *session) authenticate(username, password string) error {
-	if s.b.limiter.Blocked(s.ip) {
+	// The failure is recorded before the check and released on success, so
+	// parallel connections can not exceed the budget.
+	res, ok := s.b.limiter.Reserve(s.limitKey)
+	if !ok {
 		s.b.log.Warn("smtp auth blocked by rate limit", "ip", s.ip)
 		return errTooManyFailures
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), ingestTimeout)
+	ctx, cancel := context.WithTimeout(s.b.base, authTimeout)
 	defer cancel()
 	id, err := s.b.verifier.Verify(ctx, username, password)
 	switch {
 	case errors.Is(err, credentials.ErrInvalid):
-		s.b.limiter.Fail(s.ip)
 		// The username is deliberately not logged: clients often paste a
 		// secret into the wrong field.
 		s.b.log.Warn("smtp auth failed", "ip", s.ip)
 		return smtp.ErrAuthFailed
 	case err != nil:
+		res.Release()
 		s.b.log.Error("smtp auth error", "error", err)
 		return errAuthTemporary
 	}
+	res.Release()
 	s.identity = &id
 	s.b.log.Debug("smtp auth ok", "project_id", id.ProjectID, "credential_id", id.CredentialID)
 	return nil
@@ -128,16 +148,26 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 }
 
 // Data implements smtp.Session. The server already enforces MaxMessageBytes
-// and returns 552 to the client when it is exceeded.
+// and returns 552 to the client when it is exceeded. Each message being
+// received reserves MaxMessageBytes from a shared budget; when none frees up
+// in time the client gets a 451 and retries later.
 func (s *session) Data(r io.Reader) error {
 	if s.identity == nil {
 		return errAuthRequired
 	}
+	wait, cancelWait := context.WithTimeout(s.b.base, s.b.dataWait)
+	err := s.b.dataMem.Acquire(wait, s.b.maxMessage)
+	cancelWait()
+	if err != nil {
+		s.b.log.Warn("smtp data refused, in-flight memory budget exhausted", "project_id", s.identity.ProjectID)
+		return errServerBusy
+	}
+	defer s.b.dataMem.Release(s.b.maxMessage)
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), ingestTimeout)
+	ctx, cancel := context.WithTimeout(s.b.base, ingestTimeout)
 	defer cancel()
 	id, err := s.b.ingester.Ingest(ctx, ingest.Input{
 		ProjectID: s.identity.ProjectID, EnvelopeFrom: s.from, EnvelopeTo: s.to, Raw: raw,

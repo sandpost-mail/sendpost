@@ -15,7 +15,7 @@ func envFrom(m map[string]string) func(string) string {
 }
 
 func base() map[string]string {
-	return map[string]string{
+	return map[string]string{ //nolint:gosec // G101: fake test DSN
 		"DATABASE_URL": "postgres://u:p@localhost:5432/db",
 		"SECRET_KEY":   validKey,
 	}
