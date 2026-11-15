@@ -6,20 +6,27 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/mail"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sandpost-mail/sandpost/internal/audit"
 	"github.com/sandpost-mail/sandpost/internal/passwords"
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
 
+// BootstrapSource is the audit source of the bootstrap admin creation when
+// the context carries none.
+const BootstrapSource = "bootstrap"
+
 // BootstrapAdmin creates the first admin from ADMIN_EMAIL and ADMIN_PASSWORD
 // when, and only when, there are no users yet. The admin must change the
 // password at first login. It returns true when a user was created. With an
 // empty email it does nothing, and it never overwrites existing users, so
-// restarts and concurrent replicas are safe.
-func BootstrapAdmin(ctx context.Context, db sqlcgen.DBTX, email, password string, log *slog.Logger) (bool, error) {
+// restarts and concurrent replicas are safe. Email and password follow the
+// same rules as Service.Create, and the creation is audited like any other.
+func BootstrapAdmin(ctx context.Context, db store.DB, email, password string, log *slog.Logger) (bool, error) {
 	email = strings.TrimSpace(email)
 	if email == "" && password == "" {
 		return false, nil
@@ -27,16 +34,36 @@ func BootstrapAdmin(ctx context.Context, db sqlcgen.DBTX, email, password string
 	if email == "" || password == "" {
 		return false, errors.New("admin bootstrap needs both an email and a password")
 	}
-	addr, err := mail.ParseAddress(email)
+	email, err := NormalizeEmail(email)
 	if err != nil {
-		return false, errors.New("admin bootstrap email is not a valid address")
+		return false, fmt.Errorf("admin bootstrap email: %w", err)
+	}
+	if err := ValidatePassword(password); err != nil {
+		return false, fmt.Errorf("admin bootstrap password: %w", err)
 	}
 	hash, err := passwords.Hash(password)
 	if err != nil {
 		return false, fmt.Errorf("hash admin password: %w", err)
 	}
-	n, err := sqlcgen.New(db).CreateAdminIfNoUsers(ctx, sqlcgen.CreateAdminIfNoUsersParams{
-		Email: addr.Address, Name: localPart(addr.Address), PasswordHash: hash,
+	if _, ok := audit.Source(ctx); !ok {
+		ctx = audit.WithSource(ctx, BootstrapSource)
+	}
+	created := false
+	err = store.InTx(ctx, db, func(q *sqlcgen.Queries) error {
+		id, err := q.CreateAdminIfNoUsers(ctx, sqlcgen.CreateAdminIfNoUsersParams{
+			Email: email, Name: localPart(email), PasswordHash: hash,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // users already exist
+		}
+		if err != nil {
+			return err
+		}
+		created = true
+		return audit.Record(ctx, q, audit.Entry{
+			Action: "user.create", Target: userTarget(id),
+			Detail: map[string]any{"email": email, "is_admin": true},
+		})
 	})
 	if store.IsUniqueViolation(err) {
 		return false, nil // another replica won the race
@@ -44,11 +71,11 @@ func BootstrapAdmin(ctx context.Context, db sqlcgen.DBTX, email, password string
 	if err != nil {
 		return false, fmt.Errorf("create bootstrap admin: %w", err)
 	}
-	if n == 0 {
+	if !created {
 		log.Debug("admin bootstrap skipped, users already exist")
 		return false, nil
 	}
-	log.Info("bootstrap admin created, password change required at first login", "email", addr.Address)
+	log.Info("bootstrap admin created, password change required at first login", "email", email)
 	return true, nil
 }
 

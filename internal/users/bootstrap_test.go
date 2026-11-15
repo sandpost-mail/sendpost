@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/sandpost-mail/sandpost/internal/passwords"
@@ -34,6 +35,11 @@ func TestBootstrapAdmin(t *testing.T) {
 	if err := passwords.Verify("a-long-password-1", hash); err != nil {
 		t.Errorf("stored hash does not verify: %v", err)
 	}
+	var target, actor string
+	err = pool.QueryRow(ctx, "SELECT target, detail->>'actor' FROM audit_log WHERE action = 'user.create'").Scan(&target, &actor)
+	if err != nil || actor != users.BootstrapSource || !strings.HasPrefix(target, "user:") {
+		t.Errorf("audit row: %q %q %v", target, actor, err)
+	}
 
 	// Restart with another password: existing users are never touched.
 	created, err = users.BootstrapAdmin(ctx, pool, "other@example.test", "another-password-22", log)
@@ -52,7 +58,11 @@ func TestBootstrapAdminNoopAndValidation(t *testing.T) {
 	if created, err := users.BootstrapAdmin(ctx, pool, "", "", log); err != nil || created {
 		t.Errorf("unset: %v %v", created, err)
 	}
-	for _, c := range [][2]string{{"a@example.test", ""}, {"", "pw"}, {"not-an-email", "a-long-password-1"}} {
+	for _, c := range [][2]string{
+		{"a@example.test", ""}, {"", "pw"}, {"not-an-email", "a-long-password-1"},
+		{"Admin <a@example.test>", "a-long-password-1"}, // same email rule as Service.Create
+		{"a@example.test", "short"},                     // same password rule as Service.Create
+	} {
 		if _, err := users.BootstrapAdmin(ctx, pool, c[0], c[1], log); err == nil {
 			t.Errorf("%v should fail", c)
 		}

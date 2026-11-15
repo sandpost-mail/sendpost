@@ -6,16 +6,13 @@ package activity
 
 import (
 	"context"
-	"encoding/base64"
-	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	pagination "github.com/sandpost-mail/sandpost/internal/page"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
 
@@ -26,7 +23,7 @@ const (
 )
 
 // ErrInvalidCursor is returned for a malformed cursor.
-var ErrInvalidCursor = errors.New("invalid cursor")
+var ErrInvalidCursor = pagination.ErrInvalidCursor
 
 // Kinds of activity.
 const (
@@ -62,12 +59,7 @@ func NewReader(db sqlcgen.DBTX) *Reader { return &Reader{q: sqlcgen.New(db)} }
 
 // List returns one page of the project's activity.
 func (r *Reader) List(ctx context.Context, scope authz.Scope, cursor string, limit int) (Page, error) {
-	switch {
-	case limit <= 0:
-		limit = DefaultLimit
-	case limit > MaxLimit:
-		limit = MaxLimit
-	}
+	limit = pagination.Clamp(limit, DefaultLimit, MaxLimit)
 	p := sqlcgen.ListActivityParams{ProjectID: scope.ProjectID(), PageSize: int32(limit + 1)} //nolint:gosec // bounded
 	if cursor != "" {
 		at, kind, id, err := decodeCursor(cursor)
@@ -97,29 +89,28 @@ func (r *Reader) List(ctx context.Context, scope authz.Scope, cursor string, lim
 	return page, nil
 }
 
+// cursorSep separates the fields of the activity keyset cursor
+// "<at unix micros>|<kind>|<id>".
+const cursorSep = "|"
+
 func encodeCursor(at time.Time, kind string, id int64) string {
-	raw := strconv.FormatInt(at.UnixMicro(), 10) + "|" + kind + "|" + strconv.FormatInt(id, 10)
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+	return pagination.EncodeKeyset(cursorSep, pagination.FormatMicros(at), kind, pagination.EncodeID(id))
 }
 
 func decodeCursor(c string) (time.Time, string, int64, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(c)
+	f, err := pagination.DecodeKeyset(c, cursorSep, 3)
 	if err != nil {
+		return time.Time{}, "", 0, err
+	}
+	at, err1 := pagination.ParseMicros(f[0])
+	id, err2 := pagination.DecodeID(f[2])
+	if err1 != nil || err2 != nil {
 		return time.Time{}, "", 0, ErrInvalidCursor
 	}
-	parts := strings.Split(string(raw), "|")
-	if len(parts) != 3 {
-		return time.Time{}, "", 0, ErrInvalidCursor
-	}
-	micro, err1 := strconv.ParseInt(parts[0], 10, 64)
-	id, err2 := strconv.ParseInt(parts[2], 10, 64)
-	if err1 != nil || err2 != nil || id <= 0 {
-		return time.Time{}, "", 0, ErrInvalidCursor
-	}
-	switch parts[1] {
+	switch f[1] {
 	case KindMessage, KindComment, KindRelease:
 	default:
 		return time.Time{}, "", 0, ErrInvalidCursor
 	}
-	return time.UnixMicro(micro).UTC(), parts[1], id, nil
+	return at, f[1], id, nil
 }

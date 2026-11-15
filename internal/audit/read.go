@@ -3,14 +3,13 @@ package audit
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	pagination "github.com/sandpost-mail/sandpost/internal/page"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
 
@@ -21,18 +20,21 @@ const (
 )
 
 // ErrInvalidCursor is returned for a malformed cursor.
-var ErrInvalidCursor = errors.New("invalid cursor")
+var ErrInvalidCursor = pagination.ErrInvalidCursor
 
 // Event is one audit log row as served by the API.
 type Event struct {
-	ID          int64           `json:"id"`
-	At          time.Time       `json:"at"`
-	ActorUserID *int64          `json:"actor_user_id"`
-	ActorEmail  string          `json:"actor_email"`
-	ProjectID   *int64          `json:"project_id"`
-	Action      string          `json:"action"`
-	Target      string          `json:"target"`
-	Detail      json.RawMessage `json:"detail"`
+	ID          int64     `json:"id"`
+	At          time.Time `json:"at"`
+	ActorUserID *int64    `json:"actor_user_id"`
+	ActorEmail  string    `json:"actor_email"`
+	// ActorTokenID is the API token the action was made with, nil for
+	// sessions, system actions and deleted tokens.
+	ActorTokenID *int64          `json:"actor_token_id"`
+	ProjectID    *int64          `json:"project_id"`
+	Action       string          `json:"action"`
+	Target       string          `json:"target"`
+	Detail       json.RawMessage `json:"detail"`
 }
 
 // Page is one page, newest first. NextCursor is empty on the last page.
@@ -61,17 +63,12 @@ func (r *Reader) ListProject(ctx context.Context, scope authz.Scope, cursor stri
 }
 
 func (r *Reader) list(ctx context.Context, project pgtype.Int8, cursor string, limit int) (Page, error) {
-	switch {
-	case limit <= 0:
-		limit = DefaultLimit
-	case limit > MaxLimit:
-		limit = MaxLimit
-	}
+	limit = pagination.Clamp(limit, DefaultLimit, MaxLimit)
 	p := sqlcgen.ListAuditParams{ProjectID: project, PageSize: int32(limit + 1)} //nolint:gosec // bounded by MaxLimit+1
 	if cursor != "" {
-		id, err := strconv.ParseInt(cursor, 10, 64)
-		if err != nil || id <= 0 {
-			return Page{}, ErrInvalidCursor
+		id, err := pagination.DecodeID(cursor)
+		if err != nil {
+			return Page{}, err
 		}
 		p.BeforeID = pgtype.Int8{Int64: id, Valid: true}
 	}
@@ -82,12 +79,13 @@ func (r *Reader) list(ctx context.Context, project pgtype.Int8, cursor string, l
 	page := Page{Items: make([]Event, 0, min(len(rows), limit))}
 	for i, row := range rows {
 		if i == limit {
-			page.NextCursor = strconv.FormatInt(rows[limit-1].ID, 10)
+			page.NextCursor = pagination.EncodeID(rows[limit-1].ID)
 			break
 		}
 		page.Items = append(page.Items, Event{
 			ID: row.ID, At: row.At, ActorUserID: opt(row.ActorUserID), ActorEmail: row.ActorEmail,
-			ProjectID: opt(row.ProjectID), Action: row.Action, Target: row.Target, Detail: row.Detail,
+			ActorTokenID: opt(row.ActorTokenID),
+			ProjectID:    opt(row.ProjectID), Action: row.Action, Target: row.Target, Detail: row.Detail,
 		})
 	}
 	return page, nil
