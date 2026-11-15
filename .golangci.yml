@@ -14,6 +14,11 @@ linters:
     generated: lax
     paths:
       - internal/store/sqlcgen
+    rules:
+      # The seed script writes French sample mail on purpose.
+      - path: scripts/seedmail/
+        linters:
+          - misspell
 formatters:
   enable:
     - gofmt

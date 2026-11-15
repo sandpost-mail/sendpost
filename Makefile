@@ -1,5 +1,6 @@
 SHELL := /bin/sh
 BIN := bin/sandpost
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMPOSE := docker compose -f deploy/docker-compose.yml --env-file deploy/.env
 
 .PHONY: help build test test-gate lint openapi migrate dev dev-nodb sqlc seed web web-dev web-check docker-build clean
@@ -9,7 +10,7 @@ help:
 
 # Build the UI and embed it (internal/webui/dist) in the binary.
 build: web
-	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o $(BIN) ./cmd/sandpost
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BIN) ./cmd/sandpost
 
 test:
 	go test -race -cover ./...
@@ -58,7 +59,7 @@ deploy/.env:
 # default COOKIE_SECURE to false (plain http, works in every browser and on LAN
 # addresses); set COOKIE_SECURE=true in the environment to test the Secure cookie.
 dev: deploy/.env web
-	# $(COMPOSE) up -d --wait db
+	$(COMPOSE) up -d --wait db
 	set -a; . deploy/.env; set +a; \
 	export DATABASE_URL="postgres://sandpost:$$POSTGRES_PASSWORD@127.0.0.1:$${POSTGRES_PORT:-5432}/sandpost?sslmode=disable"; \
 	export COOKIE_SECURE="$${COOKIE_SECURE:-false}"; \
@@ -76,7 +77,7 @@ seed:
 	./scripts/seed.sh
 
 docker-build:
-	docker build -f deploy/Dockerfile -t sandpost:dev .
+	docker build -f deploy/Dockerfile --build-arg VERSION=$(VERSION) -t sandpost:dev .
 
 clean:
 	rm -rf bin web/build web/.svelte-kit

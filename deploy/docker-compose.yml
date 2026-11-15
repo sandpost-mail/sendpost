@@ -15,7 +15,7 @@ x-app-env: &app-env
 
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0
     environment:
       POSTGRES_USER: sandpost
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sandpost}
