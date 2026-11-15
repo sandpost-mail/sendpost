@@ -40,7 +40,7 @@ type adminDeps struct {
 }
 
 func runAdmin(ctx context.Context, e env, args []string) error {
-	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+	if len(args) == 0 || isHelp(args[0]) {
 		_, _ = fmt.Fprint(e.stdout, adminUsage)
 		return nil
 	}
@@ -57,7 +57,7 @@ func runAdmin(ctx context.Context, e env, args []string) error {
 	case "promote":
 		return adminPromote(ctx, e, rest)
 	default:
-		return fmt.Errorf("unknown admin task %q (see \"sandpost admin help\")", args[0])
+		return usageError("unknown admin task %q (see \"sandpost admin help\")", args[0])
 	}
 }
 
@@ -79,12 +79,17 @@ func withAdmin(ctx context.Context, e env, fn func(ctx context.Context, d adminD
 // taskFlags parses the flags of one task. Flags may come before or after the
 // positional arguments. It returns the positional arguments, which must number
 // exactly positional.
-func taskFlags(fs *flag.FlagSet, usage string, positional int, args []string) ([]string, error) {
+// With -h it prints usage to stdout and returns errHelpShown.
+func taskFlags(e env, fs *flag.FlagSet, usage string, positional int, args []string) ([]string, error) {
 	fs.SetOutput(io.Discard)
 	var pos []string
 	for {
 		if err := fs.Parse(args); err != nil {
-			return nil, fmt.Errorf("%w\n%s", err, usage)
+			if errors.Is(err, flag.ErrHelp) {
+				_, _ = fmt.Fprintln(e.stdout, usage)
+				return nil, errHelpShown
+			}
+			return nil, usageError("%v\n%s", err, usage)
 		}
 		if fs.NArg() == 0 {
 			break
@@ -93,7 +98,7 @@ func taskFlags(fs *flag.FlagSet, usage string, positional int, args []string) ([
 		args = fs.Args()[1:]
 	}
 	if len(pos) != positional {
-		return nil, errors.New(usage)
+		return nil, usageError("%s", usage)
 	}
 	return pos, nil
 }

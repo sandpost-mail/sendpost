@@ -6,11 +6,12 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/sandpost-mail/sandpost/internal/events"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
 
@@ -19,32 +20,17 @@ import (
 // "sandpost extract" with a project token, including a wait that is released
 // by mail arriving later and a run that never sees another run's mail.
 func TestCIHelpersEndToEnd(t *testing.T) {
-	dsn := testutil.PostgresDSN(t)
-	httpAddr, smtpAddr := freeAddr(t), freeAddr(t)
+	dsn := testutil.MigratedDSN(t)
 	vars := map[string]string{
-		"DATABASE_URL": dsn, "SECRET_KEY": testKey, "HTTP_LISTEN": httpAddr, "SMTP_LISTEN": smtpAddr,
+		"DATABASE_URL": dsn, "SECRET_KEY": testKey,
 		"ADMIN_EMAIL": "admin@example.test", "ADMIN_PASSWORD": "a-long-admin-password",
 	}
-	ctx := context.Background()
-	if e, _, errb := testEnv(vars); run(ctx, e, []string{"migrate", "up"}) != exitOK {
-		t.Fatalf("migrate: %s", errb)
-	}
-	e, _, _ := testEnv(vars)
-	sctx, cancel := context.WithCancel(ctx)
-	done := make(chan int, 1)
-	go func() { done <- run(sctx, e, []string{"serve"}) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(20 * time.Second):
-		}
-	})
-	base := "http://" + httpAddr
+	srv := startServe(t, vars)
+	smtpAddr := srv.smtpAddr
+	base := "http://" + srv.httpAddr
 	if code := waitStatus(t, base+"/readyz"); code != http.StatusOK {
 		t.Fatalf("readyz %d", code)
 	}
-	waitPort(t, smtpAddr)
 
 	sess := login(t, base, "admin@example.test", "a-long-admin-password")
 	sess.json(t, http.MethodPost, base+"/_/api/v1/auth/password",
@@ -62,30 +48,52 @@ func TestCIHelpersEndToEnd(t *testing.T) {
 	}
 	sess.json(t, http.MethodPost, pbase+"/tokens", map[string]any{"label": "ci", "scopes": []string{"read"}}, http.StatusCreated, &token)
 
-	send := func(runID, subject, text string) {
-		t.Helper()
+	// send runs on the test goroutine only and reports failures as errors.
+	send := func(runID, subject, text string) error {
 		c, err := smtp.Dial(smtpAddr)
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		defer func() { _ = c.Close() }()
 		if err := c.Auth(sasl.NewPlainClient("", cred.Username, cred.Secret)); err != nil {
-			t.Fatal(err)
+			return err
 		}
 		msg := "From: App <app@example.test>\r\nTo: dev@example.test\r\nSubject: " + subject + "\r\nX-Run-Id: " + runID + "\r\n\r\n" + text + "\r\n"
-		if err := c.SendMail("app@example.test", []string{"dev@example.test"}, strings.NewReader(msg)); err != nil {
-			t.Fatal(err)
-		}
+		return c.SendMail("app@example.test", []string{"dev@example.test"}, strings.NewReader(msg))
 	}
 
 	cli := map[string]string{envURL: base, envProject: fmt.Sprint(project.ID), envToken: token.Secret}
 
-	// A wait started before the mail is released by it.
+	// A wait started before the mail is released by it. The mail is sent
+	// only once the server LISTENs for the project, which only the pending
+	// wait asks for, and while the wait has not returned.
+	type ciResult struct {
+		code      int
+		out, errs string
+	}
+	waited := make(chan ciResult, 1)
 	go func() {
-		time.Sleep(700 * time.Millisecond)
-		send("run-a", "Welcome", "Your code is 482913. Confirm: https://app.example.test/verify?t=abc")
+		code, out, errs := runCI(t, cli, "wait", "--run", "run-a", "--query", "subject:welcome", "--timeout", "20")
+		waited <- ciResult{code, out, errs}
 	}()
-	code, out, errs := runCI(t, cli, "wait", "--run", "run-a", "--query", "subject:welcome", "--timeout", "20")
+	pool := testutil.PoolFor(t, dsn)
+	listen := "LISTEN " + pgx.Identifier{events.Channel(project.ID)}.Sanitize()
+	waitFor(t, func() bool {
+		var n int
+		err := pool.QueryRow(context.Background(),
+			"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND query = $1", listen).Scan(&n)
+		return err == nil && n > 0
+	})
+	select {
+	case r := <-waited:
+		t.Fatalf("wait returned before any mail was sent: %+v", r)
+	default:
+	}
+	if err := send("run-a", "Welcome", "Your code is 482913. Confirm: https://app.example.test/verify?t=abc"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	r := <-waited
+	code, out, errs := r.code, r.out, r.errs
 	if code != exitOK || strings.TrimSpace(out) == "" || errs != "" {
 		t.Fatalf("wait: code %d stdout %q stderr %q", code, out, errs)
 	}

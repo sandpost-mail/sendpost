@@ -44,6 +44,13 @@ func usageError(format string, a ...any) error {
 	return &codedError{code: exitUsage, msg: fmt.Sprintf(format, a...)}
 }
 
+// errHelpShown ends a command after its usage was printed for -h: exit 0,
+// nothing on stderr.
+var errHelpShown error = &codedError{code: exitOK}
+
+// isHelp reports whether arg asks for a command's usage.
+func isHelp(arg string) bool { return arg == "help" || arg == "-h" || arg == "--help" }
+
 // ciFlags are the options shared by wait and extract.
 type ciFlags struct {
 	fs      *flag.FlagSet
@@ -117,6 +124,7 @@ func (c *ciFlags) client(e env) (*ciclient.Client, error) {
 	if err != nil {
 		return nil, usageError("%v", err)
 	}
+	cl.Warnings = e.stderr
 	return cl, nil
 }
 

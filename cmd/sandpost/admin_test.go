@@ -101,7 +101,7 @@ func TestAdminHelpAndUnknownTask(t *testing.T) {
 		t.Errorf("help: code %d out %q", code, out)
 	}
 	e, _, errb := testEnv(nil)
-	if code := run(context.Background(), e, []string{"admin", "x"}); code != exitError || !strings.Contains(errb.String(), `unknown admin task "x"`) {
+	if code := run(context.Background(), e, []string{"admin", "x"}); code != exitUsage || !strings.Contains(errb.String(), `unknown admin task "x"`) {
 		t.Errorf("unknown: code %d err %q", code, errb)
 	}
 }
@@ -120,7 +120,7 @@ func TestAdminArgumentErrorsNeedNoDatabase(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			e, _, errb := testEnv(nil)
-			if code := run(context.Background(), e, append([]string{"admin"}, tc.args...)); code != exitError || !strings.Contains(errb.String(), tc.want) {
+			if code := run(context.Background(), e, append([]string{"admin"}, tc.args...)); code != exitUsage || !strings.Contains(errb.String(), tc.want) {
 				t.Errorf("code %d stderr %q, want %q", code, errb, tc.want)
 			}
 		})

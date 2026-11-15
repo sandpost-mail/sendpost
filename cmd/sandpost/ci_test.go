@@ -15,6 +15,7 @@ type fakeAPI struct {
 	srv      *httptest.Server
 	requests []*http.Request
 	wait     string // body of the wait route
+	waitDesc string // body of the wait route with order=desc, when set
 	extract  string // body of the extract route
 	status   int    // when not 0, every route answers with it
 }
@@ -35,6 +36,8 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			return
 		}
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/wait") && f.waitDesc != "" && r.URL.Query().Get("order") == "desc":
+			_, _ = w.Write([]byte(f.waitDesc))
 		case strings.HasSuffix(r.URL.Path, "/wait"):
 			_, _ = w.Write([]byte(f.wait))
 		case strings.HasSuffix(r.URL.Path, "/extract"):
@@ -233,13 +236,35 @@ func TestExtractWaitsThenExtracts(t *testing.T) {
 	}
 }
 
-func TestExtractLatest(t *testing.T) {
-	f := newFakeAPI(t)
-	if code, _, errs := runCI(t, f.vars(nil), "extract", "--latest"); code != exitOK {
-		t.Fatalf("code %d: %s", code, errs)
+func TestExtractLatestAsksForNewestFirst(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantOrder string
+		wantPath  string
+	}{
+		{"latest", []string{"extract", "--latest"}, "desc", "/messages/12/extract"},
+		{"oldest by default", []string{"extract"}, "", "/messages/11/extract"},
 	}
-	if got := f.last(t).URL.Path; !strings.HasSuffix(got, "/messages/12/extract") {
-		t.Fatalf("path %s, want the newest message", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeAPI(t)
+			// The fake honours order like the server: with desc the newest
+			// comes first, and the client must take that one.
+			f.waitDesc = `{"messages":[{"id":12,"subject":"b"},{"id":11,"subject":"a"}],"timed_out":false}`
+			if code, _, errs := runCI(t, f.vars(nil), tt.args...); code != exitOK {
+				t.Fatalf("code %d: %s", code, errs)
+			}
+			f.mu.Lock()
+			wait := f.requests[0]
+			f.mu.Unlock()
+			if got := wait.URL.Query().Get("order"); got != tt.wantOrder {
+				t.Errorf("wait order=%q, want %q", got, tt.wantOrder)
+			}
+			if got := f.last(t).URL.Path; !strings.HasSuffix(got, tt.wantPath) {
+				t.Fatalf("path %s, want %s", got, tt.wantPath)
+			}
+		})
 	}
 }
 
