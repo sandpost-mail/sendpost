@@ -1,0 +1,7 @@
+# Reviewers requested automatically on pull requests. Last match wins.
+*                 @duyleduc
+
+# CI, release and supply chain.
+/.github/         @duyleduc
+/.goreleaser.yaml @duyleduc
+/deploy/          @duyleduc
