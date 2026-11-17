@@ -91,32 +91,84 @@ func filterArgs(f search.Filter) (kinds, vals []string, negs []bool) {
 // ListFiltered returns messages matching f, newest first, from offset start.
 // limit is clamped to 1..MaxCompatLimit.
 func (r *Repository) ListFiltered(ctx context.Context, scope authz.Scope, f search.Filter, start, limit int) ([]Row, error) {
-	limit = min(max(limit, 1), MaxCompatLimit)
 	kinds, vals, negs := filterArgs(f)
+	off, lim := clampPaging(start, limit)
 	rows, err := r.q.CompatListMessages(ctx, sqlcgen.CompatListMessagesParams{
-		ProjectID: scope.ProjectID(), Kinds: kinds, Vals: vals, Negs: negs,
-		RowOffset: int32(min(max(start, 0), 1<<30)), //nolint:gosec // clamped
-		RowLimit:  int32(limit),                     //nolint:gosec // clamped
+		ProjectID: scope.ProjectID(), Kinds: kinds, Vals: vals, Negs: negs, RowOffset: off, RowLimit: lim,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
 	out := make([]Row, 0, len(rows))
 	for _, row := range rows {
-		item := Row{
-			ID: row.ID, ReceivedAt: row.ReceivedAt, MessageID: row.MessageIDHdr, From: row.FromAddr,
-			Subject: row.Subject, SizeBytes: row.SizeBytes, ReadAt: row.ReadAt, Tags: nonNil(row.TagNames),
-			AttachmentCount: int(row.AttachmentCount), TextHead: row.TextHead, HTMLHead: row.HtmlHead,
-		}
-		if err := json.Unmarshal(row.Headers, &item.Headers); err != nil {
-			return nil, fmt.Errorf("decode headers: %w", err)
-		}
-		if err := json.Unmarshal(row.Recipients, &item.Recipients); err != nil {
-			return nil, fmt.Errorf("decode recipients: %w", err)
+		item, err := rowOf(row)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+// CompatPage is one page of a filtered listing with the counts of the whole
+// mailbox and of the messages matching the filter.
+type CompatPage struct {
+	Rows    []Row
+	Mailbox Counts
+	Matches Counts
+}
+
+// ListPage is ListFiltered plus the counts, in one statement that evaluates
+// the filter once per message.
+func (r *Repository) ListPage(ctx context.Context, scope authz.Scope, f search.Filter, start, limit int) (CompatPage, error) {
+	kinds, vals, negs := filterArgs(f)
+	off, lim := clampPaging(start, limit)
+	rows, err := r.q.CompatListPage(ctx, sqlcgen.CompatListPageParams{
+		ProjectID: scope.ProjectID(), Kinds: kinds, Vals: vals, Negs: negs, RowOffset: off, RowLimit: lim,
+	})
+	if err != nil {
+		return CompatPage{}, fmt.Errorf("list messages: %w", err)
+	}
+	page := CompatPage{Rows: make([]Row, 0, len(rows))}
+	for _, row := range rows {
+		page.Mailbox = Counts{Total: row.MailboxTotal, Unread: row.MailboxUnread}
+		page.Matches = Counts{Total: row.MatchesTotal, Unread: row.MatchesUnread}
+		if row.ID == 0 { // the counts only row of an empty page
+			continue
+		}
+		item, err := rowOf(sqlcgen.CompatListMessagesRow{
+			ID: row.ID, ReceivedAt: row.ReceivedAt, MessageIDHdr: row.MessageIDHdr, FromAddr: row.FromAddr,
+			Subject: row.Subject, SizeBytes: row.SizeBytes, ReadAt: row.ReadAt, Headers: row.Headers,
+			TextHead: row.TextHead, HtmlHead: row.HtmlHead, Recipients: row.Recipients, TagNames: row.TagNames,
+			AttachmentCount: row.AttachmentCount,
+		})
+		if err != nil {
+			return CompatPage{}, err
+		}
+		page.Rows = append(page.Rows, item)
+	}
+	return page, nil
+}
+
+// clampPaging bounds an offset and a page size for the listing statements.
+func clampPaging(start, limit int) (offset, size int32) {
+	limit = min(max(limit, 1), MaxCompatLimit)
+	return int32(min(max(start, 0), 1<<30)), int32(limit) //nolint:gosec // both clamped
+}
+
+func rowOf(row sqlcgen.CompatListMessagesRow) (Row, error) {
+	item := Row{
+		ID: row.ID, ReceivedAt: row.ReceivedAt, MessageID: row.MessageIDHdr, From: row.FromAddr,
+		Subject: row.Subject, SizeBytes: row.SizeBytes, ReadAt: row.ReadAt, Tags: nonNil(row.TagNames),
+		AttachmentCount: int(row.AttachmentCount), TextHead: row.TextHead, HTMLHead: row.HtmlHead,
+	}
+	if err := json.Unmarshal(row.Headers, &item.Headers); err != nil {
+		return Row{}, fmt.Errorf("decode headers: %w", err)
+	}
+	if err := json.Unmarshal(row.Recipients, &item.Recipients); err != nil {
+		return Row{}, fmt.Errorf("decode recipients: %w", err)
+	}
+	return item, nil
 }
 
 // CountFiltered counts the messages matching f and how many of them are unread.
@@ -144,16 +196,25 @@ func (r *Repository) LatestID(ctx context.Context, scope authz.Scope, f search.F
 }
 
 // DeleteIDs deletes the given messages of the project and returns how many
-// existed. Ids of other projects are ignored like unknown ones.
+// existed. Ids of other projects are ignored like unknown ones. The delete and
+// the pruning of tags left unused commit together.
 func (r *Repository) DeleteIDs(ctx context.Context, scope authz.Scope, ids []int64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	n, err := r.q.CompatDeleteByIDs(ctx, sqlcgen.CompatDeleteByIDsParams{ProjectID: scope.ProjectID(), Ids: ids})
+	var n int64
+	err := store.InTx(ctx, r.db, func(q *sqlcgen.Queries) error {
+		var err error
+		n, err = q.CompatDeleteByIDs(ctx, sqlcgen.CompatDeleteByIDsParams{ProjectID: scope.ProjectID(), Ids: ids})
+		if err != nil {
+			return fmt.Errorf("delete messages: %w", err)
+		}
+		return prune(ctx, q, scope, n)
+	})
 	if err != nil {
-		return 0, fmt.Errorf("delete messages: %w", err)
+		return 0, err
 	}
-	return n, r.prune(ctx, scope, n)
+	return n, nil
 }
 
 // DeleteFiltered deletes the messages matching f. A filter without terms is
@@ -172,21 +233,29 @@ func (r *Repository) DeleteAll(ctx context.Context, scope authz.Scope) (int64, e
 
 func (r *Repository) deleteMatching(ctx context.Context, scope authz.Scope, f search.Filter) (int64, error) {
 	kinds, vals, negs := filterArgs(f)
-	n, err := r.q.CompatDeleteMatching(ctx, sqlcgen.CompatDeleteMatchingParams{
-		ProjectID: scope.ProjectID(), Kinds: kinds, Vals: vals, Negs: negs,
+	var n int64
+	err := store.InTx(ctx, r.db, func(q *sqlcgen.Queries) error {
+		var err error
+		n, err = q.CompatDeleteMatching(ctx, sqlcgen.CompatDeleteMatchingParams{
+			ProjectID: scope.ProjectID(), Kinds: kinds, Vals: vals, Negs: negs,
+		})
+		if err != nil {
+			return fmt.Errorf("delete messages: %w", err)
+		}
+		return prune(ctx, q, scope, n)
 	})
 	if err != nil {
-		return 0, fmt.Errorf("delete messages: %w", err)
+		return 0, err
 	}
-	return n, r.prune(ctx, scope, n)
+	return n, nil
 }
 
 // prune drops tags that no message carries any more, after messages went away.
-func (r *Repository) prune(ctx context.Context, scope authz.Scope, deleted int64) error {
+func prune(ctx context.Context, q *sqlcgen.Queries, scope authz.Scope, deleted int64) error {
 	if deleted == 0 {
 		return nil
 	}
-	if err := r.q.CompatPruneTags(ctx, scope.ProjectID()); err != nil {
+	if err := q.CompatPruneTags(ctx, scope.ProjectID()); err != nil {
 		return fmt.Errorf("prune tags: %w", err)
 	}
 	return nil
@@ -335,19 +404,24 @@ func (r *Repository) RenameTag(ctx context.Context, scope authz.Scope, from, to 
 }
 
 // DeleteTag removes a tag from every message of the project. It returns
-// ErrTagNotFound when no message has it.
+// ErrTagNotFound when no message has it. Pruning and the delete run in one
+// transaction.
 func (r *Repository) DeleteTag(ctx context.Context, scope authz.Scope, name string) error {
-	if err := r.q.CompatPruneTags(ctx, scope.ProjectID()); err != nil {
-		return fmt.Errorf("prune tags: %w", err)
-	}
-	n, err := r.q.CompatDeleteTag(ctx, sqlcgen.CompatDeleteTagParams{ProjectID: scope.ProjectID(), Name: name})
-	if err != nil {
-		return fmt.Errorf("delete tag: %w", err)
-	}
-	if n == 0 {
-		return ErrTagNotFound
-	}
-	return nil
+	pid := scope.ProjectID()
+	return store.InTx(ctx, r.db, func(q *sqlcgen.Queries) error {
+		// An unused tag row of that name must not count as found.
+		if err := q.CompatPruneTags(ctx, pid); err != nil {
+			return fmt.Errorf("prune tags: %w", err)
+		}
+		n, err := q.CompatDeleteTag(ctx, sqlcgen.CompatDeleteTagParams{ProjectID: pid, Name: name})
+		if err != nil {
+			return fmt.Errorf("delete tag: %w", err)
+		}
+		if n == 0 {
+			return ErrTagNotFound
+		}
+		return nil
+	})
 }
 
 // AttachmentSums returns the digests of every attachment of a message by

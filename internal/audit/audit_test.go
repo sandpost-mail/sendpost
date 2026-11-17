@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/sandpost-mail/sandpost/internal/audit"
-	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
@@ -44,7 +44,7 @@ func TestRecordAndRead(t *testing.T) {
 		t.Errorf("oldest: %+v", e)
 	}
 
-	mine, err := r.ListProject(ctx, authz.Trusted(p1), "", 0)
+	mine, err := r.ListProject(ctx, authztest.Scope(p1), "", 0)
 	if err != nil || len(mine.Items) != 1 || mine.Items[0].Action != "a.one" {
 		t.Errorf("project log: %+v %v", mine, err)
 	}
@@ -132,5 +132,45 @@ func TestReaderDatabaseFailure(t *testing.T) {
 	pool.Close()
 	if _, err := r.ListAll(context.Background(), "", 1); err == nil {
 		t.Error("expected an error on a closed pool")
+	}
+}
+
+func TestTokenIsRecorded(t *testing.T) {
+	pool := testutil.Pool(t)
+	ctx := context.Background()
+	uid := testutil.User(t, pool, "actor@example.test", false)
+	var tokenID int64
+	err := pool.QueryRow(ctx, `INSERT INTO api_tokens (owner_user_id, token_hmac, prefix, scopes)
+		VALUES ($1, '\x01', 'spu_x', '{read}') RETURNING id`, uid).Scan(&tokenID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := audit.Token(ctx); ok {
+		t.Error("no token expected")
+	}
+	if _, ok := audit.Token(audit.WithToken(ctx, 0)); ok {
+		t.Error("token 0 means none")
+	}
+	tokCtx := audit.WithToken(audit.WithActor(ctx, uid), tokenID)
+	if err := store.InTx(tokCtx, pool, func(q *sqlcgen.Queries) error {
+		return audit.Record(tokCtx, q, audit.Entry{Action: "by.token"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := audit.NewReader(pool)
+	page, err := r.ListAll(ctx, "", 0)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("list: %+v %v", page, err)
+	}
+	if e := page.Items[0]; e.ActorTokenID == nil || *e.ActorTokenID != tokenID || e.ActorUserID == nil || *e.ActorUserID != uid {
+		t.Errorf("entry: %+v", e)
+	}
+
+	// The row survives the token, without the reference.
+	if _, err := pool.Exec(ctx, "DELETE FROM api_tokens WHERE id = $1", tokenID); err != nil {
+		t.Fatal(err)
+	}
+	if page, err = r.ListAll(ctx, "", 0); err != nil || len(page.Items) != 1 || page.Items[0].ActorTokenID != nil {
+		t.Errorf("after token deletion: %+v %v", page, err)
 	}
 }

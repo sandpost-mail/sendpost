@@ -941,11 +941,13 @@ paths:
       description: |
         Answers as soon as at least `count` messages of the project match, or when `timeout` seconds
         have passed. Messages received before the call count too, `after_id` skips the ones already
-        seen. Always 200 once authorized: check `timed_out`. Matches are listed oldest first (at most 200).
+        seen. Always 200 once authorized: check `timed_out`. Matches are listed oldest first (at most 200),
+        or newest first with `order=desc` (then the first message is the latest match).
+        At most 10 wait and event stream requests per token or session run at once, more answer 429.
 
         Run isolation: `X-Run-Id` (header) or `run` (query, same meaning, both allowed when equal)
         restricts the match to messages whose own `X-Run-Id` header has that value, or that carry a
-        tag equal to it or to `run:<id>` (the tag a header rule `X-Run-Id` into `run:{value}` produces). `q` supports the same syntax as the message list, `tag:` included.
+        tag equal to it or to `run:<id>` (the tag a header rule `X-Run-Id` into `run:{value}` produces), tags compared case-insensitively. `q` supports the same syntax as the message list, `tag:` included.
       x-required-capability: messages.read
       parameters:
         - { $ref: "#/components/parameters/pid" }
@@ -955,6 +957,7 @@ paths:
         - { name: after_id, in: query, description: "Only messages with an id greater than this (default 0)", schema: { type: integer, format: int64, minimum: 0 } }
         - { name: count, in: query, description: "Minimum number of matches to wait for (default 1)", schema: { type: integer, minimum: 1, maximum: 50 } }
         - { name: timeout, in: query, description: "Seconds to wait (default 30, maximum 120, 0 checks once)", schema: { type: integer, minimum: 0, maximum: 120 } }
+        - { name: order, in: query, description: "asc (default, oldest first) or desc (newest first)", schema: { type: string, enum: [asc, desc], default: asc } }
       responses:
         "200":
           description: The matches, and whether the wait ended on the timeout
@@ -965,6 +968,11 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429":
+          description: Too many concurrent wait and event stream requests for this token or session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /projects/{pid}/messages/{mid}/extract:
     get:
@@ -1000,7 +1008,7 @@ paths:
       tags: [messages]
       operationId: streamProjectEvents
       summary: Server sent events for new messages
-      description: Events `ready`, `message.created`, `comment.created` (with `message_id`), `resync`. The stream of a browser session ends when the session expires.
+      description: Events `ready`, `message.created`, `comment.created` (with `message_id`), `resync`. The stream of a browser session ends when the session expires, and any stream ends within 30 seconds once its token or session is revoked or its project role is removed. At most 10 wait and event stream requests per token or session run at once, more answer 429.
       x-required-capability: messages.read
       parameters: [{ $ref: "#/components/parameters/pid" }]
       responses:
@@ -1012,6 +1020,11 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429":
+          description: Too many concurrent wait and event stream requests for this token or session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /projects/{pid}/transport:
     get:
@@ -1677,6 +1690,7 @@ components:
         at: { type: string, format: date-time }
         actor_user_id: { type: integer, format: int64, nullable: true }
         actor_email: { type: string }
+        actor_token_id: { type: integer, format: int64, nullable: true, description: API token the action was made with, null for sessions and system actions }
         project_id: { type: integer, format: int64, nullable: true }
         action: { type: string, example: credential.create }
         target: { type: string, example: "credential:12" }

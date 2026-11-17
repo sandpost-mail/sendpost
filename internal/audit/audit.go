@@ -15,6 +15,7 @@ import (
 
 type (
 	actorKey  struct{}
+	tokenKey  struct{}
 	sourceKey struct{}
 )
 
@@ -39,6 +40,19 @@ func WithActor(ctx context.Context, userID int64) context.Context {
 // Actor returns the user attributed to ctx, false for system actions.
 func Actor(ctx context.Context) (int64, bool) {
 	id, ok := ctx.Value(actorKey{}).(int64)
+	return id, ok && id != 0
+}
+
+// WithToken returns a context whose audit entries record the API token the
+// action was made with (actor_token_id). Set it for token principals, next to
+// WithActor for user tokens: project tokens have no user actor.
+func WithToken(ctx context.Context, tokenID int64) context.Context {
+	return context.WithValue(ctx, tokenKey{}, tokenID)
+}
+
+// Token returns the API token attributed to ctx, false when there is none.
+func Token(ctx context.Context) (int64, bool) {
+	id, ok := ctx.Value(tokenKey{}).(int64)
 	return id, ok && id != 0
 }
 
@@ -68,6 +82,9 @@ func Record(ctx context.Context, q *sqlcgen.Queries, e Entry) error {
 	p := sqlcgen.InsertAuditParams{Action: e.Action, Target: e.Target, Detail: raw}
 	if id, ok := Actor(ctx); ok {
 		p.ActorUserID = pgtype.Int8{Int64: id, Valid: true}
+	}
+	if id, ok := Token(ctx); ok {
+		p.ActorTokenID = pgtype.Int8{Int64: id, Valid: true}
 	}
 	if e.ProjectID != 0 {
 		p.ProjectID = pgtype.Int8{Int64: e.ProjectID, Valid: true}

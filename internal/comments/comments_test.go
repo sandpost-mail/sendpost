@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/comments"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/messages"
@@ -57,29 +57,29 @@ func TestServiceScopesByProject(t *testing.T) {
 	}
 	svc := comments.New(pool)
 	uid := testutil.User(t, pool, "u@example.test", false)
-	c, err := svc.Create(ctx, authz.Trusted(p1), m1, comments.Author{UserID: uid}, "hi")
+	c, err := svc.Create(ctx, authztest.Scope(p1), m1, comments.Author{UserID: uid}, "hi")
 	if err != nil || c.Author != "u@example.test" {
 		t.Fatalf("create: %+v %v", c, err)
 	}
 	// Unknown author: still stored, with a fixed label.
-	if c, err = svc.Create(ctx, authz.Trusted(p1), m1, comments.Author{}, "x"); err != nil || c.Author != "unknown" {
+	if c, err = svc.Create(ctx, authztest.Scope(p1), m1, comments.Author{}, "x"); err != nil || c.Author != "unknown" {
 		t.Fatalf("anonymous: %+v %v", c, err)
 	}
-	if _, err := svc.Create(ctx, authz.Trusted(p2), m1, comments.Author{UserID: uid}, "x"); !errors.Is(err, messages.ErrNotFound) {
+	if _, err := svc.Create(ctx, authztest.Scope(p2), m1, comments.Author{UserID: uid}, "x"); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("create in foreign project: %v", err)
 	}
-	if _, err := svc.List(ctx, authz.Trusted(p2), m1, "", 0); !errors.Is(err, messages.ErrNotFound) {
+	if _, err := svc.List(ctx, authztest.Scope(p2), m1, "", 0); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("list in foreign project: %v", err)
 	}
 	// Deleting the user keeps the comment and its author label.
 	if _, err := pool.Exec(ctx, "DELETE FROM users WHERE id=$1", uid); err != nil {
 		t.Fatal(err)
 	}
-	page, err := svc.List(ctx, authz.Trusted(p1), m1, "", 500)
+	page, err := svc.List(ctx, authztest.Scope(p1), m1, "", 500)
 	if err != nil || len(page.Items) != 2 || page.Items[0].UserID != nil || page.Items[0].Author != "u@example.test" {
 		t.Errorf("after user deletion: %+v %v", page, err)
 	}
-	if _, err := svc.Create(ctx, authz.Trusted(p1), m1, comments.Author{}, ""); !errors.Is(err, comments.ErrInvalid) {
+	if _, err := svc.Create(ctx, authztest.Scope(p1), m1, comments.Author{}, ""); !errors.Is(err, comments.ErrInvalid) {
 		t.Errorf("empty: %v", err)
 	}
 }
@@ -95,27 +95,27 @@ func TestListPagingAndCursor(t *testing.T) {
 	}
 	svc := comments.New(pool)
 	for _, b := range []string{"a", "b", "c"} {
-		if _, err := svc.Create(ctx, authz.Trusted(p), m, comments.Author{}, b); err != nil {
+		if _, err := svc.Create(ctx, authztest.Scope(p), m, comments.Author{}, b); err != nil {
 			t.Fatal(err)
 		}
 	}
-	page, err := svc.List(ctx, authz.Trusted(p), m, "", 2)
+	page, err := svc.List(ctx, authztest.Scope(p), m, "", 2)
 	if err != nil || len(page.Items) != 2 || page.NextCursor == "" {
 		t.Fatalf("page 1: %+v %v", page, err)
 	}
-	page, err = svc.List(ctx, authz.Trusted(p), m, page.NextCursor, 2)
+	page, err = svc.List(ctx, authztest.Scope(p), m, page.NextCursor, 2)
 	if err != nil || len(page.Items) != 1 || page.Items[0].Body != "c" || page.NextCursor != "" {
 		t.Fatalf("page 2: %+v %v", page, err)
 	}
 	for _, c := range []string{"x", "0", "-3"} {
-		if _, err := svc.List(ctx, authz.Trusted(p), m, c, 0); !errors.Is(err, comments.ErrInvalidCursor) {
+		if _, err := svc.List(ctx, authztest.Scope(p), m, c, 0); !errors.Is(err, comments.ErrInvalidCursor) {
 			t.Errorf("cursor %q: %v", c, err)
 		}
 	}
-	if _, err := svc.List(ctx, authz.Trusted(p), m, "", 100000); err != nil {
+	if _, err := svc.List(ctx, authztest.Scope(p), m, "", 100000); err != nil {
 		t.Errorf("limit clamp: %v", err)
 	}
-	if _, err := svc.Create(ctx, authz.Trusted(p), 999999, comments.Author{}, "x"); !errors.Is(err, messages.ErrNotFound) {
+	if _, err := svc.Create(ctx, authztest.Scope(p), 999999, comments.Author{}, "x"); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("unknown message: %v", err)
 	}
 }

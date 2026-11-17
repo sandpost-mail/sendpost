@@ -21,8 +21,9 @@ const (
 )
 
 // waitResponse is the answer of the wait endpoint. Messages are the matches
-// found, oldest first. TimedOut is true when fewer than count matched before
-// the timeout, Messages then holds what did match (possibly nothing).
+// found, oldest first (newest first with order=desc). TimedOut is true when
+// fewer than count matched before the timeout, Messages then holds what did
+// match (possibly nothing).
 type waitResponse struct {
 	Messages []messages.Summary `json:"messages"`
 	TimedOut bool               `json:"timed_out"`
@@ -52,6 +53,18 @@ func runID(r *http.Request) (string, error) {
 	return run, nil
 }
 
+// parseOrder reads the order parameter: asc (default, oldest first) or desc
+// (newest first, so the first message is the latest match).
+func parseOrder(raw string) (newestFirst bool, err error) {
+	switch raw {
+	case "", "asc":
+		return false, nil
+	case "desc":
+		return true, nil
+	}
+	return false, errors.New("invalid order, use asc or desc")
+}
+
 func parseWait(r *http.Request) (waitParams, error) {
 	vals := r.URL.Query()
 	q, err := search.Parse(vals.Get("q"))
@@ -62,8 +75,12 @@ func parseWait(r *http.Request) (waitParams, error) {
 	if err != nil {
 		return waitParams{}, err
 	}
+	newest, err := parseOrder(vals.Get("order"))
+	if err != nil {
+		return waitParams{}, err
+	}
 	p := waitParams{
-		match:   messages.MatchQuery{Query: q, Run: run, Limit: messages.MaxLimit},
+		match:   messages.MatchQuery{Query: q, Run: run, Limit: messages.MaxLimit, NewestFirst: newest},
 		count:   1,
 		timeout: defaultWaitSec * time.Second,
 	}
@@ -95,13 +112,9 @@ func intParam(raw, name string, lo, hi, def int64) (int64, error) {
 	return n, nil
 }
 
-// waitMessages is a long poll on the event bus: it answers as soon as at
-// least count messages of the project match the filters, or when the timeout
-// ends. Messages that arrived before the call count too (the usual CI order is
-// "trigger the mail, then wait"), after_id skips the ones already seen. The
-// subscription is opened and live before the first query, so a message
-// committed in between is never missed: it is either in the query result or
-// delivered as an event.
+// waitMessages is the long poll of the wait use case (messages.Waiter): it
+// parses the parameters, caps the deadline at the session expiry and writes
+// the result.
 func (s *server) waitMessages(w http.ResponseWriter, r *http.Request, c *call) {
 	if s.Bus == nil {
 		writeError(w, http.StatusNotImplemented, "waiting is not available")
@@ -112,86 +125,35 @@ func (s *server) waitMessages(w http.ResponseWriter, r *http.Request, c *call) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if p.timeout == 0 {
-		s.answerWait(w, r, c, p, true)
+	release, ok := s.acquireStream(w, c)
+	if !ok {
 		return
 	}
-	deadline := time.Now().Add(p.timeout)
-	if !c.p.ExpiresAt.IsZero() && c.p.ExpiresAt.Before(deadline) {
-		deadline = c.p.ExpiresAt
-	}
-	timer := time.NewTimer(time.Until(deadline))
-	defer timer.Stop()
-
-	sub := s.Bus.Subscribe(c.scope.ProjectID())
-	defer sub.Close()
-	select {
-	case <-sub.Ready():
-	case <-timer.C:
-		s.answerWait(w, r, c, p, true)
-		return
-	case <-r.Context().Done():
-		return
-	}
-	for {
-		items, err := s.Messages.Match(r.Context(), c.scope, p.match)
-		if err != nil {
-			s.failWait(w, r, err)
-			return
-		}
-		if len(items) >= p.count {
-			writeJSON(w, http.StatusOK, waitResponse{Messages: items})
-			return
-		}
-		if !waitForEvent(r, sub, timer) {
-			if r.Context().Err() == nil {
-				writeJSON(w, http.StatusOK, waitResponse{Messages: items, TimedOut: true})
-			}
-			return
+	defer release()
+	var deadline time.Time
+	if p.timeout > 0 {
+		deadline = time.Now().Add(p.timeout)
+		if !c.p.ExpiresAt.IsZero() && c.p.ExpiresAt.Before(deadline) {
+			deadline = c.p.ExpiresAt
 		}
 	}
-}
-
-// waitForEvent blocks until the project has news (a new message, or a resync)
-// and reports false on timeout or when the client went away. Queued events are
-// drained so a burst costs one query.
-func waitForEvent(r *http.Request, sub *events.Subscription, timer *time.Timer) bool {
-	for {
-		select {
-		case ev := <-sub.C:
-			if ev.Type != events.TypeMessageCreated && ev.Type != events.TypeResync {
-				continue
-			}
-			for {
-				select {
-				case <-sub.C:
-				default:
-					return true
-				}
-			}
-		case <-timer.C:
-			return false
-		case <-r.Context().Done():
-			return false
-		}
-	}
-}
-
-// answerWait runs one query without waiting: a zero timeout, or a call that ran
-// out of time before the subscription was live.
-func (s *server) answerWait(w http.ResponseWriter, r *http.Request, c *call, p waitParams, timedOut bool) {
-	items, err := s.Messages.Match(r.Context(), c.scope, p.match)
+	waiter := messages.NewWaiter(s.Messages, busFeed(s.Bus))
+	res, err := waiter.Wait(r.Context(), c.scope, messages.WaitRequest{Match: p.match, Count: p.count, Deadline: deadline})
 	if err != nil {
-		s.failWait(w, r, err)
+		if r.Context().Err() != nil {
+			return // the client went away
+		}
+		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, waitResponse{Messages: items, TimedOut: timedOut && len(items) < p.count})
+	writeJSON(w, http.StatusOK, waitResponse{Messages: res.Messages, TimedOut: res.TimedOut})
 }
 
-func (s *server) failWait(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, messages.ErrInvalidRun) {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	s.fail(w, r, err)
+// busFeed adapts the event bus to the feed the wait use case consumes.
+func busFeed(b *events.Bus) func(int64) messages.Feed {
+	return func(pid int64) messages.Feed { return busSubscription{b.Subscribe(pid)} }
 }
+
+type busSubscription struct{ *events.Subscription }
+
+func (s busSubscription) Events() <-chan events.Event { return s.C }

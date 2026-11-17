@@ -26,8 +26,8 @@ type compatResp struct {
 
 func (r compatResp) text() string { return string(r.body) }
 
-// compat sends a request to the compatible API. Like most Mailpit clients it
-// sends no Content-Type on bodyless requests.
+// compat sends a request to the compatible API. Like Mailpit clients it
+// declares a body as JSON and sends no Content-Type on bodyless requests.
 func (a *app) compat(style authStyle, token, method, path, body string) compatResp {
 	a.t.Helper()
 	var rdr io.Reader
@@ -37,6 +37,9 @@ func (a *app) compat(style authStyle, token, method, path, body string) compatRe
 	req, err := http.NewRequestWithContext(context.Background(), method, a.srv.URL+path, rdr)
 	if err != nil {
 		a.t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	switch style {
 	case authBearer:

@@ -154,10 +154,12 @@ func (s *Service) Members(ctx context.Context, id int64) ([]users.User, error) {
 	return out, nil
 }
 
-// AddMember puts a user in a group. It is idempotent.
+// AddMember puts a user in a group. It is idempotent, and adding a member
+// that already is one is not audited.
 func (s *Service) AddMember(ctx context.Context, groupID, userID int64) error {
 	err := store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
-		if err := q.AddGroupMember(ctx, sqlcgen.AddGroupMemberParams{GroupID: groupID, UserID: userID}); err != nil {
+		n, err := q.InsertGroupMember(ctx, sqlcgen.InsertGroupMemberParams{GroupID: groupID, UserID: userID})
+		if err != nil || n == 0 {
 			return err
 		}
 		return audit.Record(ctx, q, audit.Entry{

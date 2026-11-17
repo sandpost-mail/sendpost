@@ -13,8 +13,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -212,7 +214,7 @@ func (c *client) do(method, path string, in, out any) error {
 		b, _ := json.Marshal(in)
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, c.base+path, body)
+	req, err := http.NewRequestWithContext(context.Background(), method, c.base+path, body)
 	if err != nil {
 		return err
 	}
@@ -224,7 +226,7 @@ func (c *client) do(method, path string, in, out any) error {
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	data, _ := io.ReadAll(res.Body)
 	if res.StatusCode >= 300 {
 		return &apiError{res.StatusCode, string(data)}
@@ -265,11 +267,7 @@ func (c *client) ensure(path string, in map[string]any, match func(map[string]an
 }
 
 func asAPIError(err error, target **apiError) bool {
-	ae, ok := err.(*apiError)
-	if ok {
-		*target = ae
-	}
-	return ok
+	return errors.As(err, target)
 }
 
 // ---- messages ----

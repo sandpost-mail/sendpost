@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/messages"
 	"github.com/sandpost-mail/sandpost/internal/search"
@@ -72,7 +73,7 @@ func seedCompat(t *testing.T, e env) []int64 {
 func TestListFilteredSyntax(t *testing.T) {
 	e := newEnv(t)
 	ids := seedCompat(t, e)
-	scope := authz.Trusted(e.pid)
+	scope := authztest.Scope(e.pid)
 	ctx := context.Background()
 	if err := e.repo.SetReadIDs(ctx, scope, []int64{ids[1]}, true); err != nil {
 		t.Fatal(err)
@@ -140,7 +141,7 @@ func TestListFilteredAttachmentFlags(t *testing.T) {
 	e := newEnv(t)
 	id := addFixture(t, e, e.pid, "attachments_inline.eml")
 	e.add(t, e.pid, time.Now(), "a@x.test", "b@x.test", "plain", "x")
-	scope := authz.Trusted(e.pid)
+	scope := authztest.Scope(e.pid)
 	for q, want := range map[string]int{"has:attachment": 1, "has:inline": 1, "-has:attachment": 1, "": 2} {
 		c, err := e.repo.CountFiltered(context.Background(), scope, filter(t, q))
 		if err != nil {
@@ -159,7 +160,7 @@ func TestListFilteredAttachmentFlags(t *testing.T) {
 func TestListFilteredRowAndPaging(t *testing.T) {
 	e := newEnv(t)
 	seedCompat(t, e)
-	scope := authz.Trusted(e.pid)
+	scope := authztest.Scope(e.pid)
 	ctx := context.Background()
 
 	page, err := e.repo.ListFiltered(ctx, scope, search.Filter{}, 1, 2)
@@ -195,7 +196,7 @@ func TestListFilteredRowAndPaging(t *testing.T) {
 
 func TestLatestID(t *testing.T) {
 	e := newEnv(t)
-	scope := authz.Trusted(e.pid)
+	scope := authztest.Scope(e.pid)
 	ctx := context.Background()
 	if _, err := e.repo.LatestID(ctx, scope, search.Filter{}); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("empty mailbox: %v", err)
@@ -216,7 +217,7 @@ func TestSetReadAndDelete(t *testing.T) {
 	other := testProject(t, e, "beta")
 	ids := seedCompat(t, e)
 	foreign := e.add(t, other, time.Now(), "x@x.test", "y@x.test", "foreign", "body")
-	scope, otherScope := authz.Trusted(e.pid), authz.Trusted(other)
+	scope, otherScope := authztest.Scope(e.pid), authztest.Scope(other)
 	ctx := context.Background()
 	unread := func(s authz.Scope) int64 {
 		c, err := e.repo.CountFiltered(ctx, s, search.Filter{})
@@ -274,7 +275,7 @@ func TestTags(t *testing.T) {
 	other := testProject(t, e, "beta")
 	ids := seedCompat(t, e)
 	foreign := e.add(t, other, time.Now(), "x@x.test", "y@x.test", "foreign", "body")
-	scope, otherScope := authz.Trusted(e.pid), authz.Trusted(other)
+	scope, otherScope := authztest.Scope(e.pid), authztest.Scope(other)
 	ctx := context.Background()
 	tagsOf := func(s authz.Scope) []string {
 		got, err := e.repo.TagCounts(ctx, s)
@@ -374,7 +375,7 @@ func TestAttachmentSums(t *testing.T) {
 	other := testProject(t, e, "beta")
 	id := addFixture(t, e, e.pid, "attachments_inline.eml")
 	ctx := context.Background()
-	sums, err := e.repo.AttachmentSums(ctx, authz.Trusted(e.pid), id)
+	sums, err := e.repo.AttachmentSums(ctx, authztest.Scope(e.pid), id)
 	if err != nil || len(sums) != 2 {
 		t.Fatalf("%v %v", sums, err)
 	}
@@ -391,7 +392,7 @@ func TestAttachmentSums(t *testing.T) {
 	if want := fmt.Sprintf("%x", sha256.Sum256(pdf)); sums[0].SHA256 != want {
 		t.Errorf("sha256 of part 0 = %q want %q", sums[0].SHA256, want)
 	}
-	if _, err := e.repo.AttachmentSums(ctx, authz.Trusted(other), id); !errors.Is(err, messages.ErrNotFound) {
+	if _, err := e.repo.AttachmentSums(ctx, authztest.Scope(other), id); !errors.Is(err, messages.ErrNotFound) {
 		t.Errorf("foreign project: %v", err)
 	}
 }
@@ -399,7 +400,7 @@ func TestAttachmentSums(t *testing.T) {
 func TestTagsAreCaseInsensitive(t *testing.T) {
 	e := newEnv(t)
 	ids := seedCompat(t, e)
-	scope := authz.Trusted(e.pid)
+	scope := authztest.Scope(e.pid)
 	ctx := context.Background()
 	names := func() []string {
 		got, err := e.repo.TagCounts(ctx, scope)
@@ -455,7 +456,7 @@ func TestTagsAreCaseInsensitive(t *testing.T) {
 func TestRenameTagEdgeCases(t *testing.T) {
 	e := newEnv(t)
 	ids := seedCompat(t, e)
-	scope := authz.Trusted(e.pid)
+	scope := authztest.Scope(e.pid)
 	ctx := context.Background()
 	if err := e.repo.ReplaceTags(ctx, scope, []int64{ids[0]}, []string{"keep"}); err != nil {
 		t.Fatal(err)
@@ -485,7 +486,7 @@ func TestRenameTagEdgeCases(t *testing.T) {
 func TestReplaceTagsConcurrentOppositeOrders(t *testing.T) {
 	e := newEnv(t)
 	ids := seedCompat(t, e)
-	scope := authz.Trusted(e.pid)
+	scope := authztest.Scope(e.pid)
 	ctx := context.Background()
 	asc := []string{"t01", "t02", "t03", "t04", "t05", "t06", "t07", "t08"}
 	desc := slices.Clone(asc)

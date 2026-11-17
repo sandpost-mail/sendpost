@@ -4,12 +4,14 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 )
 
 func TestSignedGrant(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	s := newSigner("0123456789abcdef0123456789abcdef", func() time.Time { return now })
-	scope := Trusted(1)
+	s := newSigner(secrets.MustDeriveKeys("0123456789abcdef0123456789abcdef").SignedURL, func() time.Time { return now })
+	scope := Scope{projectID: 1, role: RoleOwner}
 	exp, sig := s.Sign(scope, 10, "html", time.Minute)
 
 	tests := []struct {
@@ -52,9 +54,9 @@ func TestSignedGrant(t *testing.T) {
 
 func TestSignerKeysAreIndependent(t *testing.T) {
 	now := func() time.Time { return time.Unix(1_700_000_000, 0) }
-	a := newSigner("0123456789abcdef0123456789abcdef", now)
-	b := newSigner("fedcba9876543210fedcba9876543210", now)
-	exp, sig := a.Sign(Trusted(1), 1, "html", time.Minute)
+	a := newSigner(secrets.MustDeriveKeys("0123456789abcdef0123456789abcdef").SignedURL, now)
+	b := newSigner(secrets.MustDeriveKeys("fedcba9876543210fedcba9876543210").SignedURL, now)
+	exp, sig := a.Sign(Scope{projectID: 1, role: RoleOwner}, 1, "html", time.Minute)
 	if _, err := b.Verify(1, 1, "html", exp, sig); err == nil {
 		t.Error("a signature must not verify under another key")
 	}
@@ -62,8 +64,8 @@ func TestSignerKeysAreIndependent(t *testing.T) {
 
 func TestSignTTLIsBounded(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	s := newSigner("0123456789abcdef0123456789abcdef", func() time.Time { return now })
-	exp, _ := s.Sign(Trusted(1), 1, "html", 1000*time.Hour)
+	s := newSigner(secrets.MustDeriveKeys("0123456789abcdef0123456789abcdef").SignedURL, func() time.Time { return now })
+	exp, _ := s.Sign(Scope{projectID: 1, role: RoleOwner}, 1, "html", 1000*time.Hour)
 	if exp != now.Add(maxGrantTTL).Unix() {
 		t.Errorf("ttl not capped: %d", exp-now.Unix())
 	}

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/authz/authztest"
 	"github.com/sandpost-mail/sandpost/internal/groups"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
@@ -49,8 +49,22 @@ func TestGroupCrud(t *testing.T) {
 	}
 
 	uid := testutil.User(t, pool, "u@example.test", false)
+	countAdds := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM audit_log WHERE action = 'group.member_add'").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
 	if err := svc.AddMember(ctx, g.ID, uid); err != nil {
 		t.Fatal(err)
+	}
+	if err := svc.AddMember(ctx, g.ID, uid); err != nil {
+		t.Fatalf("adding a member twice is idempotent: %v", err)
+	}
+	if n := countAdds(); n != 1 {
+		t.Errorf("a no-op add must not be audited: %d rows", n)
 	}
 	if err := svc.AddMember(ctx, g.ID, 999999); !errors.Is(err, groups.ErrNotFound) {
 		t.Errorf("add unknown user: %v", err)
@@ -87,7 +101,7 @@ func TestProjectAssignments(t *testing.T) {
 	pool := testutil.Pool(t)
 	svc := groups.NewService(pool)
 	ctx := context.Background()
-	p1, p2 := authz.Trusted(testutil.Project(t, pool, "p1")), authz.Trusted(testutil.Project(t, pool, "p2"))
+	p1, p2 := authztest.Scope(testutil.Project(t, pool, "p1")), authztest.Scope(testutil.Project(t, pool, "p2"))
 	g, _ := svc.Create(ctx, "g")
 
 	for _, bad := range []string{"", "admin", "OWNER", "root"} {
@@ -98,7 +112,7 @@ func TestProjectAssignments(t *testing.T) {
 	if err := svc.AssignRole(ctx, p1, 999999, "viewer"); !errors.Is(err, groups.ErrNotFound) {
 		t.Errorf("unknown group: %v", err)
 	}
-	if err := svc.AssignRole(ctx, authz.Trusted(999999), g.ID, "viewer"); !errors.Is(err, groups.ErrNotFound) {
+	if err := svc.AssignRole(ctx, authztest.Scope(999999), g.ID, "viewer"); !errors.Is(err, groups.ErrNotFound) {
 		t.Errorf("unknown project: %v", err)
 	}
 	for _, role := range []string{"viewer", "owner", "member"} { // later calls replace the earlier role
@@ -138,7 +152,7 @@ func TestDatabaseFailure(t *testing.T) {
 	if _, err := svc.Members(ctx, 1); err == nil || errors.Is(err, groups.ErrNotFound) {
 		t.Errorf("members: %v", err)
 	}
-	if _, err := svc.ProjectAssignments(ctx, authz.Trusted(1)); err == nil {
+	if _, err := svc.ProjectAssignments(ctx, authztest.Scope(1)); err == nil {
 		t.Error("assignments")
 	}
 	if err := svc.Delete(ctx, 1); err == nil || errors.Is(err, groups.ErrNotFound) {

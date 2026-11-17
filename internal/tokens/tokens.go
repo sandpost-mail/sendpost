@@ -8,6 +8,7 @@
 package tokens
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/audit"
 	"github.com/sandpost-mail/sandpost/internal/authz"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
@@ -33,7 +35,6 @@ const (
 	projectPrefix  = "spp_"
 	displayLen     = 12 // prefix plus 8 random characters, safe to show
 	maxLabelLength = 100
-	keyContext     = "sandpost/api-token/v1"
 )
 
 // Domain errors.
@@ -69,12 +70,10 @@ type Service struct {
 	key []byte
 }
 
-// NewService returns a Service. A dedicated HMAC key is derived from the
-// instance SECRET_KEY.
-func NewService(db store.DB, secretKey string) *Service {
-	mac := hmac.New(sha256.New, []byte(secretKey))
-	mac.Write([]byte(keyContext))
-	return &Service{db: db, key: mac.Sum(nil)}
+// NewService returns a Service. key hashes token secrets before they are
+// stored (see secrets.DeriveKeys).
+func NewService(db store.DB, key secrets.APITokenKey) *Service {
+	return &Service{db: db, key: bytes.Clone(key)}
 }
 
 // CreateForUser issues a token that acts as userID, limited by scopes (read,

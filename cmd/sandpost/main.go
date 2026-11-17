@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -37,11 +38,17 @@ type env struct {
 	stderr io.Writer
 	// prompt reads a secret from the terminal without echo.
 	prompt func(label string) (string, error)
+	// ready, when set, is called by serve once both listeners are bound. Tests
+	// listen on port 0 and learn the real addresses from it.
+	ready func(httpAddr, smtpAddr net.Addr)
 }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// After the first signal, restore the default handling so a second
+	// Ctrl-C or SIGTERM ends the process instead of waiting for the drain.
+	context.AfterFunc(ctx, stop)
 	e := env{getenv: os.Getenv, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, prompt: terminalPrompt}
 	os.Exit(run(ctx, e, os.Args[1:]))
 }
@@ -54,7 +61,10 @@ func run(ctx context.Context, e env, args []string) int {
 	var err error
 	switch args[0] {
 	case "serve":
-		err = runServe(ctx, e)
+		err = serveArgs(e, args[1:])
+		if err == nil {
+			err = runServe(ctx, e)
+		}
 	case "migrate":
 		err = runMigrate(ctx, e, args[1:])
 	case "admin":
@@ -75,6 +85,9 @@ func run(ctx context.Context, e env, args []string) int {
 		var ce *codedError
 		if errors.As(err, &ce) {
 			code = ce.code
+			if ce.msg == "" {
+				return code
+			}
 		}
 		_, _ = fmt.Fprintf(e.stderr, "sandpost %s: %v\n", args[0], err)
 		return code

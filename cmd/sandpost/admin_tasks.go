@@ -18,7 +18,7 @@ const ( //nolint:gosec // usage strings, not credentials
 )
 
 func adminListUsers(ctx context.Context, e env, args []string) error {
-	if _, err := taskFlags(flag.NewFlagSet("list-users", flag.ContinueOnError), usageListUsers, 0, args); err != nil {
+	if _, err := taskFlags(e, flag.NewFlagSet("list-users", flag.ContinueOnError), usageListUsers, 0, args); err != nil {
 		return err
 	}
 	return withAdmin(ctx, e, func(ctx context.Context, d adminDeps) error {
@@ -39,7 +39,7 @@ func adminCreateAdmin(ctx context.Context, e env, args []string) error {
 	fs := flag.NewFlagSet("create-admin", flag.ContinueOnError)
 	name := fs.String("name", "", "display name (default: the part of the email before @)")
 	stdin := fs.Bool("password-stdin", false, "read the password from the first line of stdin")
-	pos, err := taskFlags(fs, usageCreateAdmin, 1, args)
+	pos, err := taskFlags(e, fs, usageCreateAdmin, 1, args)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func adminCreateAdmin(ctx context.Context, e env, args []string) error {
 func adminResetPassword(ctx context.Context, e env, args []string) error {
 	fs := flag.NewFlagSet("reset-password", flag.ContinueOnError)
 	stdin := fs.Bool("password-stdin", false, "read the password from the first line of stdin")
-	pos, err := taskFlags(fs, usageReset, 1, args)
+	pos, err := taskFlags(e, fs, usageReset, 1, args)
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,7 @@ func adminResetPassword(ctx context.Context, e env, args []string) error {
 }
 
 func adminUnlock(ctx context.Context, e env, args []string) error {
-	pos, err := taskFlags(flag.NewFlagSet("unlock", flag.ContinueOnError), usageUnlock, 1, args)
+	pos, err := taskFlags(e, flag.NewFlagSet("unlock", flag.ContinueOnError), usageUnlock, 1, args)
 	if err != nil {
 		return err
 	}
@@ -106,7 +106,7 @@ func adminUnlock(ctx context.Context, e env, args []string) error {
 }
 
 func adminPromote(ctx context.Context, e env, args []string) error {
-	pos, err := taskFlags(flag.NewFlagSet("promote", flag.ContinueOnError), usagePromote, 1, args)
+	pos, err := taskFlags(e, flag.NewFlagSet("promote", flag.ContinueOnError), usagePromote, 1, args)
 	if err != nil {
 		return err
 	}

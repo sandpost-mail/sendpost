@@ -1,6 +1,7 @@
 -- Messages for the long poll wait endpoint: the filters of ListMessages plus a
--- run filter (header X-Run-Id, tag equal to the run id or tag run:<id>) and an id floor,
--- oldest first so a poller can resume from the last id it saw.
+-- run filter (header X-Run-Id, tag equal to the run id or tag run:<id>, tags compared
+-- case-insensitively) and an id floor. Oldest first so a poller can resume from the
+-- last id it saw, or newest first with newest_first (the latest matches).
 -- name: MatchMessages :many
 SELECT m.id, m.received_at, m.from_addr, m.subject, m.size_bytes, m.read_at,
        COALESCE((SELECT array_agg(r.address ORDER BY r.address)
@@ -20,13 +21,13 @@ WHERE m.project_id = @project_id
   AND (sqlc.narg('subject_like')::text IS NULL OR m.subject ILIKE sqlc.narg('subject_like')::text)
   AND (sqlc.narg('tag')::text IS NULL OR EXISTS (
         SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id
-        WHERE mt.message_id = m.id AND t.name = sqlc.narg('tag')::text))
+        WHERE mt.message_id = m.id AND lower(t.name) = lower(sqlc.narg('tag')::text)))
   AND (sqlc.narg('run')::text IS NULL
        OR EXISTS (SELECT 1 FROM jsonb_each(m.headers) h
                   WHERE lower(h.key) = 'x-run-id' AND h.value ? sqlc.narg('run')::text)
        OR EXISTS (SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id
                   WHERE mt.message_id = m.id
-                    AND t.name IN (sqlc.narg('run')::text, 'run:' || sqlc.narg('run')::text)))
+                    AND lower(t.name) IN (lower(sqlc.narg('run')::text), lower('run:' || sqlc.narg('run')::text))))
   AND (sqlc.narg('received_after')::timestamptz IS NULL
        OR m.received_at >= sqlc.narg('received_after')::timestamptz)
   AND (sqlc.narg('received_before')::timestamptz IS NULL
@@ -36,5 +37,5 @@ WHERE m.project_id = @project_id
   AND (sqlc.narg('free')::text IS NULL
        OR m.search @@ websearch_to_tsquery('simple', sqlc.narg('free')::text)
        OR m.subject ILIKE sqlc.narg('free_like')::text)
-ORDER BY m.id ASC
+ORDER BY CASE WHEN @newest_first::bool THEN m.id END DESC, m.id ASC
 LIMIT @page_size::int;

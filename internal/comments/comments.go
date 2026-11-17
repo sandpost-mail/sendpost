@@ -7,9 +7,9 @@ package comments
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -22,6 +22,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/events"
 	"github.com/sandpost-mail/sandpost/internal/messages"
+	pagination "github.com/sandpost-mail/sandpost/internal/page"
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 )
@@ -37,7 +38,7 @@ const (
 // Domain errors. ErrInvalid messages are safe to show.
 var (
 	ErrInvalid       = errors.New("invalid comment")
-	ErrInvalidCursor = errors.New("invalid cursor")
+	ErrInvalidCursor = pagination.ErrInvalidCursor
 )
 
 // Comment is one comment as served by the API.
@@ -111,8 +112,7 @@ func (s *Service) Create(ctx context.Context, scope authz.Scope, messageID int64
 		return Comment{}, err
 	}
 	var out Comment
-	err = s.inTx(ctx, func(tx pgx.Tx) error {
-		q := sqlcgen.New(tx)
+	err = store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
 		row, err := q.InsertComment(ctx, sqlcgen.InsertCommentParams{
 			ProjectID: scope.ProjectID(), MessageID: messageID, Body: body,
 			UserID:  pgtype.Int8{Int64: by.UserID, Valid: by.UserID != 0},
@@ -131,7 +131,7 @@ func (s *Service) Create(ctx context.Context, scope authz.Scope, messageID int64
 		}); err != nil {
 			return err
 		}
-		return events.Notify(ctx, tx, scope.ProjectID(), events.Event{Type: events.TypeCommentCreated, MessageID: messageID})
+		return notify(ctx, q, scope.ProjectID(), events.Event{Type: events.TypeCommentCreated, MessageID: messageID})
 	})
 	return out, err
 }
@@ -139,17 +139,12 @@ func (s *Service) Create(ctx context.Context, scope authz.Scope, messageID int64
 // List returns the comments of a message, oldest first. cursor is the
 // NextCursor of the previous page.
 func (s *Service) List(ctx context.Context, scope authz.Scope, messageID int64, cursor string, limit int) (Page, error) {
-	switch {
-	case limit <= 0:
-		limit = DefaultLimit
-	case limit > MaxLimit:
-		limit = MaxLimit
-	}
+	limit = pagination.Clamp(limit, DefaultLimit, MaxLimit)
 	var after int64
 	if cursor != "" {
-		n, err := strconv.ParseInt(cursor, 10, 64)
-		if err != nil || n <= 0 {
-			return Page{}, ErrInvalidCursor
+		n, err := pagination.DecodeID(cursor)
+		if err != nil {
+			return Page{}, err
 		}
 		after = n
 	}
@@ -169,7 +164,7 @@ func (s *Service) List(ctx context.Context, scope authz.Scope, messageID int64, 
 	page := Page{Items: make([]Comment, 0, min(len(rows), limit))}
 	for i, r := range rows {
 		if i == limit {
-			page.NextCursor = strconv.FormatInt(rows[limit-1].ID, 10)
+			page.NextCursor = pagination.EncodeID(rows[limit-1].ID)
 			break
 		}
 		page.Items = append(page.Items, toComment(r.ID, r.MessageID, r.UserID, r.AuthorLabel, r.Body, r.CreatedAt))
@@ -177,17 +172,15 @@ func (s *Service) List(ctx context.Context, scope authz.Scope, messageID int64, 
 	return page, nil
 }
 
-func (s *Service) inTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
-	tx, err := s.db.Begin(ctx)
+// notify is events.Notify on a transaction bound Queries: store.InTx hands
+// out Queries, not the pgx.Tx events.Notify takes. Same channel and payload.
+func notify(ctx context.Context, q *sqlcgen.Queries, projectID int64, ev events.Event) error {
+	payload, err := json.Marshal(ev)
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return fmt.Errorf("encode event: %w", err)
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if err := fn(tx); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	if err := q.NotifyChannel(ctx, sqlcgen.NotifyChannelParams{Channel: events.Channel(projectID), Payload: string(payload)}); err != nil {
+		return fmt.Errorf("notify: %w", err)
 	}
 	return nil
 }

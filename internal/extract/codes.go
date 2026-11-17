@@ -45,7 +45,26 @@ var (
 	// digits split by a space or dash, or an alphanumeric token holding a digit.
 	keywordRe = regexp.MustCompile(`(?i)\b(?:code|otp|pin|passcode|password|token)\b[^\n\d]{0,40}?` +
 		`(\d{3,4}[ -]\d{3,4}|\d{4,8}|[A-Z0-9]{3,5}-[A-Z0-9]{3,5}|[A-Z0-9]{6,10})\b`)
-	digitsRe = regexp.MustCompile(`(?:^|[^\d.,/:+-])(\d{6})(?:$|[^\d.,/:-])`)
+	// digitRunRe finds runs of ASCII digits. A run is a standalone code when
+	// it has exactly 6 digits and its neighbours pass digitBoundaryOK. The
+	// boundaries are checked in code, not consumed by the pattern, so codes
+	// separated by a single character are all found (RE2 has no lookaround).
+	digitRunRe  = regexp.MustCompile(`\d+`)
+	sepStripper = strings.NewReplacer(" ", "", "-", "")
+)
+
+const (
+	standaloneDigits = 6
+	// Characters that make a digit run part of a number, date, time or phone
+	// number rather than a code. A leading '+' marks a phone number, a
+	// trailing one does not.
+	notBefore = ".,/:+-"
+	notAfter  = ".,/:-"
+	// firstBatch is the number of matches requested first; it grows
+	// geometrically only while duplicates or empty matches keep the result
+	// under MaxCodes, up to maxMatches, past which the scan stops.
+	firstBatch = MaxCodes * 4
+	maxMatches = firstBatch * 64
 )
 
 // Codes returns the one-time codes found in text, distinct, in order of
@@ -65,27 +84,73 @@ func Codes(text, pattern string) ([]Code, error) {
 		if err != nil {
 			return nil, ErrBadPattern
 		}
-		return collect(re.FindAllStringSubmatch(text, -1), KindCustom, true, false), nil
+		return collectBounded(submatches(re, text), KindCustom, true, false), nil
 	}
 	text = urlRe.ReplaceAllString(text, " ")
-	if got := collect(keywordRe.FindAllStringSubmatch(text, -1), KindKeyword, false, true); len(got) > 0 {
+	got := collectBounded(submatches(keywordRe, text), KindKeyword, false, true)
+	if len(got) > 0 {
 		return got, nil
 	}
-	return collect(digitsRe.FindAllStringSubmatch(text, -1), KindDigits, false, false), nil
+	return collectBounded(func(n int) ([][]string, bool) { return standaloneDigitRuns(text, n) },
+		KindDigits, false, false), nil
 }
 
-// collect turns regexp matches into distinct codes. The code is the last
-// capture group when the pattern has one (the whole match otherwise).
+// finder returns at most n matches and whether more may exist past them.
+type finder func(n int) (matches [][]string, more bool)
+
+func submatches(re *regexp.Regexp, text string) finder {
+	return func(n int) ([][]string, bool) {
+		ms := re.FindAllStringSubmatch(text, n)
+		return ms, len(ms) == n
+	}
+}
+
+// standaloneDigitRuns returns, as single element matches, the 6 digit runs of
+// text whose neighbours are not number separators, scanning at most n runs.
+func standaloneDigitRuns(text string, n int) ([][]string, bool) {
+	locs := digitRunRe.FindAllStringIndex(text, n)
+	out := make([][]string, 0, len(locs))
+	for _, loc := range locs {
+		if loc[1]-loc[0] != standaloneDigits || !digitBoundaryOK(text, loc[0], loc[1]) {
+			continue
+		}
+		out = append(out, []string{text[loc[0]:loc[1]]})
+	}
+	return out, len(locs) == n
+}
+
+func digitBoundaryOK(text string, start, end int) bool {
+	if start > 0 && strings.IndexByte(notBefore, text[start-1]) >= 0 {
+		return false
+	}
+	return end >= len(text) || strings.IndexByte(notAfter, text[end]) < 0
+}
+
+// collectBounded asks find for at most n matches and grows n only when the
+// distinct codes found so far are below MaxCodes and more matches may exist,
+// so a pattern matching everywhere never materialises the whole scan window.
+func collectBounded(find finder, kind string, custom, requireDigit bool) []Code {
+	for n := firstBatch; ; n *= 4 {
+		matches, more := find(n)
+		out := collect(matches, kind, custom, requireDigit)
+		if len(out) >= MaxCodes || !more || n >= maxMatches {
+			return out
+		}
+	}
+}
+
+// collect turns regexp matches into distinct codes. The code is capture
+// group 1 when the pattern has a group, the whole match otherwise.
 func collect(matches [][]string, kind string, custom, requireDigit bool) []Code {
 	seen := map[string]struct{}{}
 	out := []Code{}
 	for _, m := range matches {
-		v := m[len(m)-1]
-		if custom && len(m) == 1 {
-			v = m[0]
+		v := m[0]
+		if len(m) > 1 {
+			v = m[1]
 		}
 		if !custom {
-			v = strings.NewReplacer(" ", "", "-", "").Replace(v)
+			v = sepStripper.Replace(v)
 		}
 		v = strings.TrimSpace(v)
 		if v == "" || (requireDigit && !strings.ContainsAny(v, "0123456789")) {

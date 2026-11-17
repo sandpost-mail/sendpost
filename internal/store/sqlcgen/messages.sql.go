@@ -292,7 +292,7 @@ WHERE m.project_id = $1
   AND ($4::text IS NULL OR m.subject ILIKE $4::text)
   AND ($5::text IS NULL OR EXISTS (
         SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id
-        WHERE mt.message_id = m.id AND t.name = $5::text))
+        WHERE mt.message_id = m.id AND lower(t.name) = lower($5::text)))
   AND ($6::timestamptz IS NULL
        OR m.received_at >= $6::timestamptz)
   AND ($7::timestamptz IS NULL

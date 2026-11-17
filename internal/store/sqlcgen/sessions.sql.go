@@ -26,11 +26,11 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 }
 
 const deleteExpiredSessions = `-- name: DeleteExpiredSessions :execrows
-DELETE FROM sessions WHERE expires_at <= now()
+DELETE FROM sessions WHERE expires_at <= $1
 `
 
-func (q *Queries) DeleteExpiredSessions(ctx context.Context) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteExpiredSessions)
+func (q *Queries) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredSessions, now)
 	if err != nil {
 		return 0, err
 	}
@@ -73,8 +73,13 @@ const getSessionUser = `-- name: GetSessionUser :one
 SELECT u.id, u.email, u.name, u.is_admin, u.must_change_password, u.created_at, u.disabled_at,
        s.expires_at
 FROM sessions s JOIN users u ON u.id = s.user_id
-WHERE s.id = $1 AND s.expires_at > now() AND u.disabled_at IS NULL
+WHERE s.id = $1 AND s.expires_at > $2 AND u.disabled_at IS NULL
 `
+
+type GetSessionUserParams struct {
+	ID  []byte
+	Now time.Time
+}
 
 type GetSessionUserRow struct {
 	ID                 int64
@@ -87,8 +92,8 @@ type GetSessionUserRow struct {
 	ExpiresAt          time.Time
 }
 
-func (q *Queries) GetSessionUser(ctx context.Context, id []byte) (GetSessionUserRow, error) {
-	row := q.db.QueryRow(ctx, getSessionUser, id)
+func (q *Queries) GetSessionUser(ctx context.Context, arg GetSessionUserParams) (GetSessionUserRow, error) {
+	row := q.db.QueryRow(ctx, getSessionUser, arg.ID, arg.Now)
 	var i GetSessionUserRow
 	err := row.Scan(
 		&i.ID,

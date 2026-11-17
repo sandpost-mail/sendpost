@@ -12,23 +12,53 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Third-party actions are pinned by commit SHA; the trailing comment names the release.
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.6
+          version: v2.15.0
+
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: go.mod and go.sum are tidy
+        run: go mod tidy -diff
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Scans the packages of the shipped binary: test-only dependencies
+      # (testcontainers and its docker graph) are not part of it.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./cmd/...
 
   test:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0
         env:
           POSTGRES_USER: sandpost
           POSTGRES_PASSWORD: sandpost
@@ -43,29 +73,32 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://sandpost:sandpost@localhost:5432/postgres?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
-      - run: go tool cover -func=coverage.out | tail -1
+      # Race tests over every package. Fails on any skipped test (TEST_DATABASE_URL
+      # is set, so the integration tier must run) and on a package under 80% coverage.
+      - run: ./scripts/test-gate.sh
 
   build:
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - run: go build ./...
-      - run: CGO_ENABLED=0 go build -trimpath -o bin/sandpost ./cmd/sandpost
-      - run: docker build -f deploy/Dockerfile -t sandpost:ci .
+      - run: CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o bin/sandpost ./cmd/sandpost
+      - run: docker build -f deploy/Dockerfile --build-arg VERSION="${VERSION}" -t sandpost:ci .
 
   sqlc:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: sqlc-dev/setup-sqlc@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: sqlc-dev/setup-sqlc@bac53b7fb28c039a6c7f5736fd1e89744021bdd6 # v5.0.0
         with:
           sqlc-version: "1.31.1"
       - run: sqlc diff
@@ -73,14 +106,14 @@ jobs:
   openapi:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       # docs/openapi.yaml must describe exactly the routes the server registers
       # (methods, paths, capabilities, auth rules).
       - run: go test -run 'OpenAPI' -count=1 ./internal/api/
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - run: npx --yes @redocly/cli@2.64.1 lint docs/openapi.yaml
@@ -91,8 +124,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm

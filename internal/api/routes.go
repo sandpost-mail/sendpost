@@ -39,6 +39,9 @@ type call struct {
 	p authz.Principal
 	// scope is set for accessProject and accessSigned routes.
 	scope authz.Scope
+	// cap is the capability the route required, for handlers that re-check
+	// access later (long lived streams).
+	cap authz.Capability
 }
 
 type handler func(w http.ResponseWriter, r *http.Request, c *call)

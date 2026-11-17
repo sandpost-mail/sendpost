@@ -4,11 +4,52 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
+
+// TestInTxPanicReleasesConnection pins that a panic in fn rolls the
+// transaction back and returns its connection: with a one-connection pool the
+// next InTx would otherwise block until its context expires.
+func TestInTxPanicReleasesConnection(t *testing.T) {
+	pool := testutil.PoolFor(t, testutil.PostgresDSN(t)+"&pool_max_conns=1")
+	if got := pool.Config().MaxConns; got != 1 {
+		t.Fatalf("pool_max_conns override ignored: MaxConns %d", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	func() {
+		defer func() {
+			if r := recover(); r != "boom" {
+				t.Fatalf("recovered %v, want the original panic", r)
+			}
+		}()
+		_ = store.InTx(ctx, pool, func(*sqlcgen.Queries) error { panic("boom") })
+	}()
+
+	if err := store.InTx(ctx, pool, func(*sqlcgen.Queries) error { return nil }); err != nil {
+		t.Fatalf("InTx after a panic: %v", err)
+	}
+}
+
+// TestInTxCancelledContextStillReleases checks that an fn error on a
+// cancelled context does not leave the transaction open.
+func TestInTxCancelledContextStillReleases(t *testing.T) {
+	pool := testutil.PoolFor(t, testutil.PostgresDSN(t)+"&pool_max_conns=1")
+	ctx, cancel := context.WithCancel(context.Background())
+	boom := errors.New("boom")
+	err := store.InTx(ctx, pool, func(*sqlcgen.Queries) error { cancel(); return boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want boom", err)
+	}
+	if st := pool.Stat(); st.AcquiredConns() != 0 {
+		t.Fatalf("acquired connections after InTx: %d", st.AcquiredConns())
+	}
+}
 
 func TestInTx(t *testing.T) {
 	pool := testutil.Pool(t)

@@ -5,3 +5,4 @@ web/.svelte-kit
 web/build
 deploy/.env
 *.env
+cmd/sandpost/sandpost

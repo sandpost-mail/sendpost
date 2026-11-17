@@ -13,7 +13,6 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/events"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
-	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
@@ -77,11 +76,8 @@ func TestIngestStoresEverything(t *testing.T) {
 
 func TestIngestAttachmentsAndNotify(t *testing.T) {
 	ctx := context.Background()
-	dsn := testutil.PostgresDSN(t)
+	dsn := testutil.MigratedDSN(t)
 	pool := testutil.PoolFor(t, dsn)
-	if _, err := store.MigrateUp(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	pid := testutil.Project(t, pool, "alpha")
 	other := testutil.Project(t, pool, "beta")
 

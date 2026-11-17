@@ -80,7 +80,13 @@ func runExtract(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	if !cf.set("message") {
-		id, err := waitForMessage(ctx, e, cf, cl, ciclient.WaitParams{Query: *query, AfterID: *afterID, Count: 1, Timeout: timeout}, *latest)
+		p := ciclient.WaitParams{Query: *query, AfterID: *afterID, Count: 1, Timeout: timeout}
+		if *latest {
+			// Newest first, so the first match is the latest however many
+			// messages match.
+			p.Order = ciclient.OrderDesc
+		}
+		id, err := waitForMessage(ctx, e, cf, cl, p)
 		if err != nil {
 			return err
 		}
@@ -138,7 +144,9 @@ func selectValues(ex ciclient.Extraction, kind string) []string {
 	return out
 }
 
-func waitForMessage(ctx context.Context, e env, cf *ciFlags, cl *ciclient.Client, p ciclient.WaitParams, latest bool) (int64, error) {
+// waitForMessage waits for one match and returns the first message of the
+// answer: the oldest, or the newest when p.Order is desc.
+func waitForMessage(ctx context.Context, e env, cf *ciFlags, cl *ciclient.Client, p ciclient.WaitParams) (int64, error) {
 	run, err := cf.runID(e)
 	if err != nil {
 		return 0, err
@@ -150,9 +158,6 @@ func waitForMessage(ctx context.Context, e env, cf *ciFlags, cl *ciclient.Client
 	}
 	if res.TimedOut || len(res.Messages) == 0 {
 		return 0, &codedError{code: exitTimeout, msg: timedOutMessage(p.Timeout, 1, len(res.Messages))}
-	}
-	if latest {
-		return res.Messages[len(res.Messages)-1].ID, nil
 	}
 	return res.Messages[0].ID, nil
 }

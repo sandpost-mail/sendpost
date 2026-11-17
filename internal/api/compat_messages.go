@@ -1,8 +1,8 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -57,22 +57,21 @@ func parseIDs(in []string) []int64 {
 	return out
 }
 
-// readCompatJSON decodes an optional JSON body. empty is true when there is
-// no body at all. Unknown fields are ignored, as Mailpit does.
-func readCompatJSON(r *http.Request, dst any) (empty bool, err error) {
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		return false, err
-	}
-	if len(strings.TrimSpace(string(data))) == 0 {
+// compatJSON decodes the optional JSON body the guard buffered. empty is true
+// when the body is blank. Unlike Mailpit, unknown fields and trailing data are
+// refused: a mistyped key must not turn into "no IDs", which for DELETE
+// /messages means "delete everything". Keys match without regard to case, as
+// with encoding/json.
+func compatJSON(c *compatCall, dst any) (empty bool, err error) {
+	if len(bytes.TrimSpace(c.body)) == 0 {
 		return true, nil
 	}
-	return false, json.Unmarshal(data, dst)
+	return false, decodeStrict(c.body, dst)
 }
 
 // compatBody decodes a required JSON body or answers 400.
-func compatBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	empty, err := readCompatJSON(r, dst)
+func compatBody(w http.ResponseWriter, c *compatCall, dst any) bool {
+	empty, err := compatJSON(c, dst)
 	if err != nil || empty {
 		compatText(w, http.StatusBadRequest, "invalid JSON body")
 		return false
@@ -103,23 +102,10 @@ func (s *server) compatSearch(w http.ResponseWriter, r *http.Request, c *compatC
 // writeCompatList answers a list or search request. total and unread describe
 // the whole mailbox, messages_count and messages_unread the matches.
 func (s *server) writeCompatList(w http.ResponseWriter, r *http.Request, c *compatCall, f search.Filter, start, limit int) {
-	ctx := r.Context()
-	rows, err := s.Messages.ListFiltered(ctx, c.scope, f, start, limit)
+	page, err := s.Messages.ListPage(r.Context(), c.scope, f, start, limit)
 	if err != nil {
 		s.compatFail(w, r, err)
 		return
-	}
-	mailbox, err := s.Messages.CountFiltered(ctx, c.scope, search.Filter{})
-	if err != nil {
-		s.compatFail(w, r, err)
-		return
-	}
-	matches := mailbox
-	if !f.IsZero() {
-		if matches, err = s.Messages.CountFiltered(ctx, c.scope, f); err != nil {
-			s.compatFail(w, r, err)
-			return
-		}
 	}
 	tags, err := s.tagNames(r, c)
 	if err != nil {
@@ -127,9 +113,9 @@ func (s *server) writeCompatList(w http.ResponseWriter, r *http.Request, c *comp
 		return
 	}
 	writeCompatJSON(w, mpList{
-		Total: mailbox.Total, Unread: mailbox.Unread, Count: len(rows),
-		MessagesCount: matches.Total, MessagesUnread: matches.Unread,
-		Start: start, Tags: tags, Messages: summariesOf(rows),
+		Total: page.Mailbox.Total, Unread: page.Mailbox.Unread, Count: len(page.Rows),
+		MessagesCount: page.Matches.Total, MessagesUnread: page.Matches.Unread,
+		Start: start, Tags: tags, Messages: summariesOf(page.Rows),
 	})
 }
 
@@ -141,7 +127,7 @@ func (s *server) compatSetRead(w http.ResponseWriter, r *http.Request, c *compat
 		IDs    []string
 		Search string
 	}
-	if !compatBody(w, r, &body) {
+	if !compatBody(w, c, &body) {
 		return
 	}
 	if len(body.IDs) > maxCompatIDs {
@@ -175,7 +161,7 @@ func (s *server) compatSetRead(w http.ResponseWriter, r *http.Request, c *compat
 // instead of deleting everything.
 func (s *server) compatDelete(w http.ResponseWriter, r *http.Request, c *compatCall) {
 	var body struct{ IDs []string }
-	if _, err := readCompatJSON(r, &body); err != nil {
+	if _, err := compatJSON(c, &body); err != nil {
 		compatText(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

@@ -36,13 +36,14 @@ type Attachment struct {
 }
 
 type AuditLog struct {
-	ID          int64
-	At          time.Time
-	ActorUserID pgtype.Int8
-	ProjectID   pgtype.Int8
-	Action      string
-	Target      string
-	Detail      []byte
+	ID           int64
+	At           time.Time
+	ActorUserID  pgtype.Int8
+	ProjectID    pgtype.Int8
+	Action       string
+	Target       string
+	Detail       []byte
+	ActorTokenID pgtype.Int8
 }
 
 type Comment struct {

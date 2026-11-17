@@ -1,5 +1,6 @@
 // Package secrets encrypts small secrets at rest (relay passwords) with
-// AES-256-GCM. The key is derived from the instance SECRET_KEY, and every
+// AES-256-GCM. The key is the TransportKey derived from the instance
+// SECRET_KEY (see DeriveKeys, which also derives every other purpose key), and every
 // ciphertext is bound to a context string (for example "transport:<project>")
 // so a blob copied to another row does not decrypt.
 //
@@ -11,34 +12,27 @@ package secrets
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 )
 
-const (
-	keyContext = "sandpost/transport-secret/v1"
-	versionAES = 1
-)
+const versionAES = 1
 
 // ErrDecrypt is returned for any blob that can not be opened: wrong key,
 // wrong context, corruption or an unknown format. Callers must not send
 // anything that depends on the secret.
 var ErrDecrypt = errors.New("secret can not be decrypted")
 
-// Box seals and opens secrets with a key derived from SECRET_KEY.
+// Box seals and opens secrets with the TransportKey.
 type Box struct {
 	aead cipher.AEAD
 }
 
-// New derives the encryption key from secretKey. It panics only if the
-// standard library refuses a 32 byte AES key, which can not happen.
-func New(secretKey string) *Box {
-	mac := hmac.New(sha256.New, []byte(secretKey))
-	mac.Write([]byte(keyContext))
-	block, err := aes.NewCipher(mac.Sum(nil))
+// NewBox returns a Box keyed by key. It panics if key is not a 32 byte AES
+// key, which can only happen for a zero Keys value (a programming error).
+func NewBox(key TransportKey) *Box {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		panic(fmt.Sprintf("secrets: aes key: %v", err))
 	}

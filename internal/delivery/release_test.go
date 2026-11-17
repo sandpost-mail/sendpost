@@ -11,6 +11,7 @@ import (
 	"github.com/sandpost-mail/sandpost/internal/delivery"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
 	"github.com/sandpost-mail/sandpost/internal/policy"
+	"github.com/sandpost-mail/sandpost/internal/secrets"
 	"github.com/sandpost-mail/sandpost/internal/testutil"
 )
 
@@ -151,7 +152,7 @@ func TestReleaseIsAudited(t *testing.T) {
 
 func TestReleaseWithoutQueueFails(t *testing.T) {
 	e := newEnv(t, testutil.RelayOptions{})
-	svc := delivery.NewService(e.pool, testKey, &delivery.SMTPRelay{}, nil)
+	svc := delivery.NewService(e.pool, secrets.NewBox(secrets.MustDeriveKeys(testKey).Transport), &delivery.SMTPRelay{}, nil)
 	if _, err := svc.Release(e.ctx, e.scope, 1, []string{"a@corp.example"}); err == nil {
 		t.Error("release without a queue must fail")
 	}
@@ -169,7 +170,7 @@ func TestReleaseRollsBackWhenTheJobCanNotBeQueued(t *testing.T) {
 	e.transport(delivery.TLSNone, true)
 	e.policy("allow", "", "@corp.example")
 	mid := e.capture("x@elsewhere.test")
-	svc := delivery.NewService(e.pool, testKey, &delivery.SMTPRelay{}, failingQueue{})
+	svc := delivery.NewService(e.pool, secrets.NewBox(secrets.MustDeriveKeys(testKey).Transport), &delivery.SMTPRelay{}, failingQueue{})
 	if _, err := svc.Release(e.ctx, e.scope, mid, []string{"a@corp.example"}); err == nil {
 		t.Fatal("want an error")
 	}

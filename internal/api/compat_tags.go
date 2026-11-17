@@ -4,6 +4,13 @@ import (
 	"net/http"
 )
 
+// Bounds of PUT /tags. One request writes up to IDs x Tags message_tags rows
+// in a single transaction, so both the tag count and the product are capped.
+const (
+	maxCompatTags     = 100
+	maxCompatTagLinks = 100_000
+)
+
 // tagNames lists the tag names in use in the project, never nil.
 func (s *server) tagNames(r *http.Request, c *compatCall) ([]string, error) {
 	tags, err := s.Messages.TagCounts(r.Context(), c.scope)
@@ -33,11 +40,19 @@ func (s *server) compatSetTags(w http.ResponseWriter, r *http.Request, c *compat
 		Tags []string
 		IDs  []string
 	}
-	if !compatBody(w, r, &body) {
+	if !compatBody(w, c, &body) {
 		return
 	}
 	if len(body.IDs) > maxCompatIDs {
 		compatText(w, http.StatusBadRequest, "too many IDs")
+		return
+	}
+	if len(body.Tags) > maxCompatTags {
+		compatText(w, http.StatusBadRequest, "too many tags")
+		return
+	}
+	if len(body.IDs)*len(body.Tags) > maxCompatTagLinks {
+		compatText(w, http.StatusBadRequest, "too many IDs times tags")
 		return
 	}
 	if err := s.Messages.ReplaceTags(r.Context(), c.scope, parseIDs(body.IDs), body.Tags); err != nil {
@@ -50,7 +65,7 @@ func (s *server) compatSetTags(w http.ResponseWriter, r *http.Request, c *compat
 // compatRenameTag is PUT /tags/{Tag}.
 func (s *server) compatRenameTag(w http.ResponseWriter, r *http.Request, c *compatCall) {
 	var body struct{ Name string }
-	if !compatBody(w, r, &body) {
+	if !compatBody(w, c, &body) {
 		return
 	}
 	if err := s.Messages.RenameTag(r.Context(), c.scope, r.PathValue("Tag"), body.Name); err != nil {

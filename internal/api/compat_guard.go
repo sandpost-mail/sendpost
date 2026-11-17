@@ -1,15 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
-	"github.com/sandpost-mail/sandpost/internal/messages"
-	"github.com/sandpost-mail/sandpost/internal/policy"
-	"github.com/sandpost-mail/sandpost/internal/projects"
-	"github.com/sandpost-mail/sandpost/internal/search"
 	"github.com/sandpost-mail/sandpost/internal/tokens"
 )
 
@@ -25,6 +22,10 @@ type compatCall struct {
 	base string
 	// root is the prefix of the /view pages, "" or "/p/{slug}".
 	root string
+	// body is the request body of a write, read once by the guard (see
+	// compatReadBody). Handlers decode it with compatJSON or compatBody and
+	// never read r.Body.
+	body []byte
 }
 
 type compatHandler func(w http.ResponseWriter, r *http.Request, c *compatCall)
@@ -65,9 +66,38 @@ func (s *server) compatGuard(rt compatRoute, slugForm bool) http.Handler {
 			return
 		}
 		c.scope = scope
-		r.Body = http.MaxBytesReader(w, r.Body, compatMaxBody)
-		rt.h(w, r, c)
+		if c.body, ok = compatReadBody(w, r); !ok {
+			return
+		}
+		rt.h(w, admit(r, p), c)
 	})
+}
+
+// compatReadBody reads the body of a write request up front, under the
+// request body deadline and size limit, and refuses a non-empty body that is
+// not declared as JSON. Browsers can not send application/json cross site
+// without a CORS preflight, so cached Basic credentials can not be used by a
+// form post on another site. Bodyless writes (Mailpit's "delete all") need
+// no content type. The handler then decodes the returned bytes.
+func compatReadBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return nil, true
+	}
+	data, err := readBodyWithDeadline(w, r, compatMaxBody)
+	var mbe *http.MaxBytesError
+	switch {
+	case errors.As(err, &mbe):
+		compatText(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return nil, false
+	case err != nil:
+		compatText(w, http.StatusBadRequest, "can not read request body")
+		return nil, false
+	}
+	if len(bytes.TrimSpace(data)) > 0 && !isJSONContentType(r) {
+		compatText(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return nil, false
+	}
+	return data, true
 }
 
 // compatAuthenticate resolves the principal from the Authorization header.
@@ -76,7 +106,11 @@ func (s *server) compatAuthenticate(w http.ResponseWriter, r *http.Request) (aut
 	if secret == "" {
 		if !present {
 			// The challenge lets clients that wait for one send their
-			// credentials, and a browser ask for them.
+			// credentials (HTTP libraries that only answer a challenge, such
+			// as .NET's NetworkCredential or curl --anyauth), and a browser
+			// ask for them for the /view pages. Cached browser credentials
+			// can not drive writes: those need a JSON body, see
+			// compatReadBody.
 			w.Header().Set("WWW-Authenticate", `Basic realm="Sandpost", charset="UTF-8"`)
 		}
 		compatText(w, http.StatusUnauthorized, "authentication required")
@@ -121,31 +155,9 @@ func compatText(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(msg))
+	_, _ = w.Write([]byte(msg)) //nolint:gosec // G705: text/plain with nosniff, never rendered as HTML
 }
 
 func compatNotFound(w http.ResponseWriter) { compatText(w, http.StatusNotFound, "404 page not found") }
 
 func compatOK(w http.ResponseWriter) { compatText(w, http.StatusOK, "ok") }
-
-// compatFail maps domain errors the way Mailpit answers. Anything missing or
-// not visible is the same 404, input problems are 400 with the message, and
-// unexpected errors are logged and answered with a generic 500.
-func (s *server) compatFail(w http.ResponseWriter, r *http.Request, err error) {
-	switch {
-	case errors.Is(err, authz.ErrNotFound), errors.Is(err, messages.ErrNotFound), errors.Is(err, projects.ErrNotFound),
-		errors.Is(err, messages.ErrTagNotFound):
-		compatNotFound(w)
-	case errors.Is(err, authz.ErrForbidden):
-		compatText(w, http.StatusForbidden, "forbidden")
-	case errors.Is(err, policy.ErrBlocked):
-		compatText(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, search.ErrInvalidDate), errors.Is(err, search.ErrQueryTooLong),
-		errors.Is(err, messages.ErrEmptyFilter), errors.Is(err, search.ErrTooManyTerms),
-		errors.Is(err, search.ErrSizeTooLarge), errors.Is(err, messages.ErrTagExists), errors.Is(err, messages.ErrInvalidTag):
-		compatText(w, http.StatusBadRequest, err.Error())
-	default:
-		s.Log.Error("compat request failed", "method", r.Method, "path", r.URL.Path, "error", err)
-		compatText(w, http.StatusInternalServerError, "internal error")
-	}
-}

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
@@ -24,26 +23,18 @@ import (
 // authenticated SMTP and a client subscribed to the project's SSE stream sees
 // the message live, then reads it through the API.
 func TestEndToEndSMTPToLiveUI(t *testing.T) {
-	dsn := testutil.PostgresDSN(t)
-	httpAddr, smtpAddr := freeAddr(t), freeAddr(t)
+	dsn := testutil.MigratedDSN(t)
 	vars := map[string]string{
-		"DATABASE_URL": dsn, "SECRET_KEY": testKey, "HTTP_LISTEN": httpAddr, "SMTP_LISTEN": smtpAddr,
+		"DATABASE_URL": dsn, "SECRET_KEY": testKey,
 		"ADMIN_EMAIL": "admin@example.test", "ADMIN_PASSWORD": "a-long-admin-password",
 	}
 	ctx := context.Background()
-	if e, _, errb := testEnv(vars); run(ctx, e, []string{"migrate", "up"}) != exitOK {
-		t.Fatalf("migrate: %s", errb)
-	}
-
-	e, _, errb := testEnv(vars)
-	sctx, cancel := context.WithCancel(ctx)
-	done := make(chan int, 1)
-	go func() { done <- run(sctx, e, []string{"serve"}) }()
+	srv := startServe(t, vars)
+	httpAddr, smtpAddr := srv.httpAddr, srv.smtpAddr
 	base := "http://" + httpAddr
 	if code := waitStatus(t, base+"/readyz"); code != http.StatusOK {
 		t.Fatalf("readyz %d", code)
 	}
-	waitPort(t, smtpAddr)
 
 	// Without a session the native API is closed.
 	apiJSON(t, nil, http.MethodGet, base+"/_/api/v1/projects", nil, http.StatusUnauthorized, nil)
@@ -97,6 +88,9 @@ func TestEndToEndSMTPToLiveUI(t *testing.T) {
 	if err := c.SendMail("app@example.test", []string{"dev@example.test"}, strings.NewReader(body)); err != nil {
 		t.Fatal(err)
 	}
+	// Hang up: an idle SMTP session would hold the SMTP server for its own
+	// shutdown grace, which is not what the shutdown check below measures.
+	_ = c.Quit()
 	waitLine(t, sc, "event: message.created")
 
 	var page struct {
@@ -125,16 +119,16 @@ func TestEndToEndSMTPToLiveUI(t *testing.T) {
 		t.Errorf("bootstrap admin: %q %v", hash, err)
 	}
 
-	// Graceful shutdown ends the open SSE stream too.
-	cancel()
-	select {
-	case code := <-done:
-		if code != exitOK {
-			t.Fatalf("serve exit %d stderr %q", code, errb)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("serve did not stop")
+	// Graceful shutdown ends the open SSE stream too, well within the
+	// shutdown budget.
+	start := time.Now()
+	if code := srv.stop(); code != exitOK {
+		t.Fatalf("serve exit %d logs %q", code, srv.logs)
 	}
+	if took := time.Since(start); took > shutdownTimeout/2 {
+		t.Errorf("shutdown took %s with an open SSE stream", took)
+	}
+	errb := srv.logs
 	if strings.Contains(errb.String(), cred.Secret) || strings.Contains(errb.String(), "a-long-admin-password") {
 		t.Error("a secret leaked into the logs")
 	}
@@ -220,17 +214,4 @@ func waitLine(t *testing.T, sc *bufio.Scanner, want string) {
 		}
 	}
 	t.Fatalf("stream ended before %q (%v)", want, sc.Err())
-}
-
-func waitPort(t *testing.T, addr string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if c, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", addr); err == nil {
-			_ = c.Close()
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("nothing listening on %s", addr)
 }

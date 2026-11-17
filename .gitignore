@@ -24,3 +24,4 @@ web/.svelte-kit/
 web/build/
 .serena/
 .playwright-mcp/
+/cmd/sandpost/sandpost

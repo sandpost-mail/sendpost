@@ -58,6 +58,24 @@ func (q *Queries) GetGroup(ctx context.Context, id int64) (Group, error) {
 	return i, err
 }
 
+const insertGroupMember = `-- name: InsertGroupMember :execrows
+INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+`
+
+type InsertGroupMemberParams struct {
+	GroupID int64
+	UserID  int64
+}
+
+// Like AddGroupMember, but reports 0 when the user already was a member.
+func (q *Queries) InsertGroupMember(ctx context.Context, arg InsertGroupMemberParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertGroupMember, arg.GroupID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const listGroupMembers = `-- name: ListGroupMembers :many
 SELECT u.id, u.email, u.name, u.is_admin, u.must_change_password, u.created_at, u.disabled_at
 FROM group_members m JOIN users u ON u.id = m.user_id

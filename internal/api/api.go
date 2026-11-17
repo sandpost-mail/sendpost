@@ -2,11 +2,9 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
-	"io"
 	"log/slog"
-	"mime"
 	"net/http"
+	"net/netip"
 	"strconv"
 
 	"github.com/sandpost-mail/sandpost/internal/activity"
@@ -61,6 +59,9 @@ type Deps struct {
 	// prefix). Set it whenever the UI is served over HTTPS, including behind
 	// a TLS terminating proxy.
 	CookieSecure bool
+	// TrustedProxies lists the reverse proxies whose X-Forwarded-For header is
+	// honoured when deriving the client address for login rate limits.
+	TrustedProxies []netip.Prefix
 	// UI serves the embedded single page app for every non API path.
 	UI  http.Handler
 	Log *slog.Logger
@@ -72,6 +73,8 @@ type server struct {
 	// loginSlots bounds concurrent password checks: each argon2 verify takes
 	// 64 MiB, and the failure limit is only exact when checks do not overlap.
 	loginSlots chan struct{}
+	// streams caps the concurrent SSE streams and wait polls per principal.
+	streams *streamLimits
 }
 
 // NewHandler returns the HTTP handler: health endpoints, the native API under
@@ -88,14 +91,17 @@ func NewHandler(d Deps) http.Handler {
 	mux := http.NewServeMux()
 	registerHealth(mux, d.DB)
 	if d.Authz != nil {
-		s := &server{Deps: d, logins: newLoginLimits(), loginSlots: make(chan struct{}, maxConcurrentLogins)}
+		s := &server{
+			Deps: d, logins: newLoginLimits(d.TrustedProxies...), loginSlots: make(chan struct{}, maxConcurrentLogins),
+			streams: newStreamLimits(maxStreamsPerPrincipal),
+		}
 		s.registerV1(mux)
 		s.registerCompat(mux)
 	}
 	if d.UI != nil {
 		mux.Handle("/", d.UI)
 	}
-	return mux
+	return accessLog(d.Log, mux)
 }
 
 func pathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
@@ -112,24 +118,13 @@ func pathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
 func requireJSONWrites(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			if err != nil || mt != contentTypeJSON {
+			if !isJSONContentType(r) {
 				writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return false
-	}
-	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

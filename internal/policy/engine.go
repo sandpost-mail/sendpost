@@ -13,6 +13,7 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -141,6 +142,13 @@ func (o Outbound) Covers() []string { return append([]string(nil), o.covers...) 
 // Data returns a copy of the message bytes to send.
 func (o Outbound) Data() []byte { return append([]byte(nil), o.data...) }
 
+// WriteTo writes the message bytes to w without copying them, so a relay can
+// stream a large message. It implements io.WriterTo.
+func (o Outbound) WriteTo(w io.Writer) (int64, error) {
+	n, err := w.Write(o.data)
+	return int64(n), err
+}
+
 // Restrict returns the part of o still needed, given which original
 // recipients keep(original) says are not done yet. The second result is false
 // when nothing is left. It never adds recipients.
@@ -246,16 +254,20 @@ func split(msg Message, p *Policy, list []entry, redirect Address, sender string
 			})
 		}
 	}
+	if len(direct) == 0 && len(redirected) == 0 {
+		return plan
+	}
+	parsed := parseMessage(msg.Raw) // once, shared by both copies
 	if len(direct) > 0 {
 		plan.Outbound = append(plan.Outbound, Outbound{
 			kind: KindAllowed, sender: sender, envelopeTo: direct, covers: append([]string(nil), direct...),
-			data: rewriteHeaders(msg.Raw, headerEdit{}),
+			data: parsed.rewrite(headerEdit{}),
 		})
 	}
 	if len(redirected) > 0 {
 		plan.Outbound = append(plan.Outbound, Outbound{
 			kind: KindRedirect, sender: sender, envelopeTo: []string{redirect.String()}, covers: redirected,
-			data: rewriteHeaders(msg.Raw, headerEdit{
+			data: parsed.rewrite(headerEdit{
 				subjectPrefix: strings.TrimSpace(p.SubjectPrefix),
 				originalTo:    msg.To, originalCc: msg.Cc,
 			}),
@@ -269,41 +281,65 @@ func split(msg Message, p *Policy, list []entry, redirect Address, sender string
 // every target must be on the allowlist: one refused target blocks the whole
 // release. The message is sent as captured, minus Bcc and X-Original-*.
 func EvaluateRelease(in ReleaseInput) (Plan, error) {
-	p := in.Policy
-	if p == nil {
-		return Plan{}, blocked("no delivery policy is configured")
-	}
-	sender, err := checkSending(in.Transport)
+	plan, sender, err := checkRelease(in)
 	if err != nil {
 		return Plan{}, err
 	}
-	list, err := parseAllowlist(p.Allowlist)
-	if err != nil {
-		return Plan{}, blocked("allowlist is invalid: %v", err)
-	}
-	if len(in.Targets) == 0 || len(in.Targets) > MaxReleaseTargets {
-		return Plan{}, blocked("a release needs between 1 and %d targets", MaxReleaseTargets)
-	}
-	targets, err := parseRecipients(in.Targets)
-	if err != nil {
-		return Plan{}, err
-	}
-	var plan Plan
-	envelope := make([]string, 0, len(targets))
-	for _, a := range targets {
-		if !allowed(list, a) {
-			return Plan{}, blocked("%s is not on the allowlist", a.String())
-		}
-		envelope = append(envelope, a.String())
-		plan.Decisions = append(plan.Decisions, Decision{
-			Recipient: a.String(), Effective: a.String(), Action: ActionDeliver, Reason: "released manually",
-		})
-	}
+	envelope := plan.targets()
 	plan.Outbound = []Outbound{{
 		kind: KindRelease, sender: sender, envelopeTo: envelope, covers: append([]string(nil), envelope...),
 		data: rewriteHeaders(in.Message.Raw, headerEdit{}),
 	}}
 	return plan, nil
+}
+
+// CheckRelease applies exactly the rules of EvaluateRelease and returns the
+// decisions only, never an Outbound. It does not read Message.Raw, so a
+// caller that only validates a release does not need to load the message.
+func CheckRelease(in ReleaseInput) (Plan, error) {
+	plan, _, err := checkRelease(in)
+	return plan, err
+}
+
+// targets returns the recipients of the plan's decisions, in order.
+func (p Plan) targets() []string {
+	out := make([]string, 0, len(p.Decisions))
+	for _, d := range p.Decisions {
+		out = append(out, d.Recipient)
+	}
+	return out
+}
+
+func checkRelease(in ReleaseInput) (Plan, string, error) {
+	p := in.Policy
+	if p == nil {
+		return Plan{}, "", blocked("no delivery policy is configured")
+	}
+	sender, err := checkSending(in.Transport)
+	if err != nil {
+		return Plan{}, "", err
+	}
+	list, err := parseAllowlist(p.Allowlist)
+	if err != nil {
+		return Plan{}, "", blocked("allowlist is invalid: %v", err)
+	}
+	if len(in.Targets) == 0 || len(in.Targets) > MaxReleaseTargets {
+		return Plan{}, "", blocked("a release needs between 1 and %d targets", MaxReleaseTargets)
+	}
+	targets, err := parseRecipients(in.Targets)
+	if err != nil {
+		return Plan{}, "", err
+	}
+	var plan Plan
+	for _, a := range targets {
+		if !allowed(list, a) {
+			return Plan{}, "", blocked("%s is not on the allowlist", a.String())
+		}
+		plan.Decisions = append(plan.Decisions, Decision{
+			Recipient: a.String(), Effective: a.String(), Action: ActionDeliver, Reason: "released manually",
+		})
+	}
+	return plan, sender, nil
 }
 
 // checkSending verifies the transport and returns the validated envelope sender.

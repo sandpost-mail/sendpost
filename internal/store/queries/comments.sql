@@ -69,3 +69,8 @@ SELECT at::timestamptz AS at, kind::text AS kind, id::bigint AS id, message_id::
 FROM ev
 ORDER BY at DESC, kind COLLATE "C" DESC, id DESC
 LIMIT @page_size::int;
+
+-- Publishes a payload on a LISTEN/NOTIFY channel (see internal/events), so it
+-- can run on a transaction bound Queries and fire only on commit.
+-- name: NotifyChannel :exec
+SELECT pg_notify(@channel::text, @payload::text);

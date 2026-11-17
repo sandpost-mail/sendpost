@@ -1,7 +1,9 @@
 package ingest
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -96,6 +98,7 @@ func TestExtractLinks(t *testing.T) {
 			"", []string{"https://a.test", "http://b.test/m"}},
 		{"dedupe across html and text", `<a href="https://a.test">a</a>`, "https://a.test", []string{"https://a.test"}},
 		{"case insensitive scheme", `<a href="HTTPS://A.test">a</a>`, "", []string{"HTTPS://A.test"}},
+		{"entities in href are decoded", `<A HREF="https://a.test/?x=1&amp;y=2">a</A>`, "", []string{"https://a.test/?x=1&y=2"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -113,6 +116,46 @@ func TestExtractLinksIsBounded(t *testing.T) {
 	}
 	if got := len(ExtractLinks("", text)); got != maxLinks {
 		t.Errorf("links %d", got)
+	}
+}
+
+func TestApplyRulesCapsTagsPerMessage(t *testing.T) {
+	vals := make([]string, 0, maxTagsPerMessage*3)
+	for i := range maxTagsPerMessage * 3 {
+		vals = append(vals, fmt.Sprintf("v%03d", i))
+	}
+	rules := []Rule{
+		{Kind: RuleHeader, HeaderName: "X-Tag", Tag: "t:{value}"},
+		{Kind: RuleRecipient, Pattern: "*", Tag: "late"},
+	}
+	got := ApplyRules(rules, map[string][]string{"X-Tag": vals}, []Recipient{{Kind: KindTo, Address: "a@x.test"}})
+	if len(got) != maxTagsPerMessage || got[0] != "t:v000" {
+		t.Fatalf("got %d tags, first %q", len(got), got[0])
+	}
+}
+
+func TestExtractLinksStopsAtCapWithAnchors(t *testing.T) {
+	var b strings.Builder
+	for i := range maxLinks + 100 {
+		fmt.Fprintf(&b, `<a href="https://h.test/%d">x</a>`, i)
+	}
+	got := ExtractLinks(b.String(), "https://text.test/only")
+	if len(got) != maxLinks || got[0] != "https://h.test/0" || got[maxLinks-1] != fmt.Sprintf("https://h.test/%d", maxLinks-1) {
+		t.Fatalf("links %d first %q", len(got), got[0])
+	}
+}
+
+func TestExtractLinksScansPastDuplicates(t *testing.T) {
+	text := strings.Repeat("https://dup.test ", maxLinks*urlScanFactor) + "https://late.test"
+	got := ExtractLinks("", text)
+	if !reflect.DeepEqual(got, []string{"https://dup.test"}) {
+		// The scan is bounded: a distinct URL behind more than
+		// maxLinks*urlScanFactor duplicates is not looked at.
+		t.Fatalf("got %v", got)
+	}
+	got = ExtractLinks("", strings.Repeat("https://dup.test ", 100)+"https://late.test")
+	if !reflect.DeepEqual(got, []string{"https://dup.test", "https://late.test"}) {
+		t.Fatalf("got %v", got)
 	}
 }
 

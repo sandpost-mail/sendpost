@@ -16,7 +16,7 @@ func (p pinger) Ping(ctx context.Context) error { return p(ctx) }
 
 func get(h http.Handler, path string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil))
 	return rec
 }
 

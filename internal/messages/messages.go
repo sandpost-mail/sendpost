@@ -4,11 +4,9 @@ package messages
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +15,7 @@ import (
 
 	"github.com/sandpost-mail/sandpost/internal/authz"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
+	pagination "github.com/sandpost-mail/sandpost/internal/page"
 	"github.com/sandpost-mail/sandpost/internal/search"
 	"github.com/sandpost-mail/sandpost/internal/store"
 	"github.com/sandpost-mail/sandpost/internal/store/sqlcgen"
@@ -31,7 +30,7 @@ const (
 // Domain errors.
 var (
 	ErrNotFound      = errors.New("message not found")
-	ErrInvalidCursor = errors.New("invalid cursor")
+	ErrInvalidCursor = pagination.ErrInvalidCursor
 )
 
 // Summary is one row of the message list.
@@ -99,12 +98,7 @@ func New(db store.DB) *Repository { return &Repository{q: sqlcgen.New(db), db: d
 // List returns one page of the project's messages, newest first, filtered by
 // query. cursor is the NextCursor of the previous page, or empty.
 func (r *Repository) List(ctx context.Context, scope authz.Scope, query search.Query, cursor string, limit int) (Page, error) {
-	switch {
-	case limit <= 0:
-		limit = DefaultLimit
-	case limit > MaxLimit:
-		limit = MaxLimit
-	}
+	limit = pagination.Clamp(limit, DefaultLimit, MaxLimit)
 	params := listParams(scope.ProjectID(), query, limit+1)
 	if cursor != "" {
 		at, id, err := decodeCursor(cursor)
@@ -162,17 +156,34 @@ func nonNil(s []string) []string {
 
 // Get returns a message with its recipients, attachments, links and tags.
 func (r *Repository) Get(ctx context.Context, scope authz.Scope, id int64) (Detail, error) {
+	d, _, err := r.GetWithHTML(ctx, scope, id)
+	return d, err
+}
+
+// GetWithHTML is Get plus the HTML body ("" when there is none), from the
+// same row, for views that need both.
+func (r *Repository) GetWithHTML(ctx context.Context, scope authz.Scope, id int64) (Detail, string, error) {
 	m, err := r.q.GetMessage(ctx, sqlcgen.GetMessageParams{ProjectID: scope.ProjectID(), ID: id})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Detail{}, ErrNotFound
+		return Detail{}, "", ErrNotFound
 	}
 	if err != nil {
-		return Detail{}, fmt.Errorf("get message: %w", err)
+		return Detail{}, "", fmt.Errorf("get message: %w", err)
 	}
+	d, err := r.detail(ctx, m)
+	if err != nil {
+		return Detail{}, "", err
+	}
+	return d, m.HtmlBody, nil
+}
+
+func (r *Repository) detail(ctx context.Context, m sqlcgen.GetMessageRow) (Detail, error) {
+	id := m.ID
 	headers := map[string][]string{}
 	if err := json.Unmarshal(m.Headers, &headers); err != nil {
 		return Detail{}, fmt.Errorf("decode headers: %w", err)
 	}
+	var err error
 	d := Detail{
 		ID: m.ID, ReceivedAt: m.ReceivedAt, MessageID: m.MessageIDHdr, From: m.FromAddr,
 		Subject: m.Subject, SizeBytes: m.SizeBytes, Text: m.TextBody, HasHTML: m.HtmlBody != "",
@@ -283,24 +294,23 @@ func (r *Repository) MarkRead(ctx context.Context, scope authz.Scope, id int64) 
 	return nil
 }
 
+// cursorSep separates the fields of the message list keyset cursor
+// "<received_at unix micros>:<id>".
+const cursorSep = ":"
+
 func encodeCursor(at time.Time, id int64) string {
-	raw := strconv.FormatInt(at.UnixMicro(), 10) + ":" + strconv.FormatInt(id, 10)
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+	return pagination.EncodeKeyset(cursorSep, pagination.FormatMicros(at), pagination.EncodeID(id))
 }
 
 func decodeCursor(c string) (time.Time, int64, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(c)
+	f, err := pagination.DecodeKeyset(c, cursorSep, 2)
 	if err != nil {
-		return time.Time{}, 0, ErrInvalidCursor
+		return time.Time{}, 0, err
 	}
-	us, ids, ok := strings.Cut(string(raw), ":")
-	if !ok {
-		return time.Time{}, 0, ErrInvalidCursor
-	}
-	micro, err1 := strconv.ParseInt(us, 10, 64)
-	id, err2 := strconv.ParseInt(ids, 10, 64)
+	at, err1 := pagination.ParseMicros(f[0])
+	id, err2 := pagination.ParseInt(f[1])
 	if err1 != nil || err2 != nil {
 		return time.Time{}, 0, ErrInvalidCursor
 	}
-	return time.UnixMicro(micro).UTC(), id, nil
+	return at, id, nil
 }

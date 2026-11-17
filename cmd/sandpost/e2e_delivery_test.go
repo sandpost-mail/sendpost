@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -31,44 +30,29 @@ type e2eStack struct {
 	sess    *session
 	pid     int64
 	cred    struct{ Username, Secret string }
-	logs    *bytes.Buffer
+	logs    *syncBuffer
 	execSQL func(sql string, args ...any)
 	stop    func()
 }
 
 func startStack(t *testing.T) *e2eStack {
 	t.Helper()
-	dsn := testutil.PostgresDSN(t)
-	httpAddr, smtpAddr := freeAddr(t), freeAddr(t)
+	dsn := testutil.MigratedDSN(t)
 	vars := map[string]string{
-		"DATABASE_URL": dsn, "SECRET_KEY": testKey, "HTTP_LISTEN": httpAddr, "SMTP_LISTEN": smtpAddr,
+		"DATABASE_URL": dsn, "SECRET_KEY": testKey,
 		"ADMIN_EMAIL": "admin@example.test", "ADMIN_PASSWORD": "a-long-admin-password",
 	}
 	ctx := context.Background()
-	if e, _, errb := testEnv(vars); run(ctx, e, []string{"migrate", "up"}) != exitOK {
-		t.Fatalf("migrate: %s", errb)
-	}
-	e, _, errb := testEnv(vars)
-	sctx, cancel := context.WithCancel(ctx)
-	done := make(chan int, 1)
-	go func() { done <- run(sctx, e, []string{"serve"}) }()
-	s := &e2eStack{t: t, base: "http://" + httpAddr, smtp: smtpAddr, logs: errb}
+	srv := startServe(t, vars)
+	s := &e2eStack{t: t, base: "http://" + srv.httpAddr, smtp: srv.smtpAddr, logs: srv.logs}
 	s.stop = func() {
-		cancel()
-		select {
-		case code := <-done:
-			if code != exitOK {
-				t.Errorf("serve exit %d stderr %q", code, errb)
-			}
-		case <-time.After(30 * time.Second):
-			t.Error("serve did not stop")
+		if code := srv.stop(); code != exitOK {
+			t.Errorf("serve exit %d logs %q", code, srv.logs)
 		}
 	}
-	t.Cleanup(func() { s.stop(); s.stop = func() {} })
 	if code := waitStatus(t, s.base+"/readyz"); code != http.StatusOK {
 		t.Fatalf("readyz %d", code)
 	}
-	waitPort(t, smtpAddr)
 
 	s.sess = login(t, s.base, "admin@example.test", "a-long-admin-password")
 	s.sess.json(t, http.MethodPost, s.base+"/_/api/v1/auth/password",
@@ -155,6 +139,13 @@ type deliveryRow struct {
 // none is pending. It never sleeps for a fixed time.
 func (s *e2eStack) waitTerminal(mid int64) []deliveryRow {
 	s.t.Helper()
+	return s.waitTerminalRows(mid, 1)
+}
+
+// waitTerminalRows waits until at least minRows delivery rows exist and none is
+// pending: rows for different recipients may be written at different times.
+func (s *e2eStack) waitTerminalRows(mid int64, minRows int) []deliveryRow {
+	s.t.Helper()
 	deadline := time.Now().Add(40 * time.Second)
 	for time.Now().Before(deadline) {
 		var out struct {
@@ -165,7 +156,7 @@ func (s *e2eStack) waitTerminal(mid int64) []deliveryRow {
 		for _, r := range out.Items {
 			pending = pending || r.Status == "pending"
 		}
-		if len(out.Items) > 0 && !pending {
+		if len(out.Items) >= minRows && !pending {
 			return out.Items
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -267,7 +258,7 @@ func TestEndToEndDeliveryNeverReachesRealRecipientsWhenMisconfigured(t *testing.
 		s.putTransport(map[string]any{"kind": "smtp", "host": trap.Host, "port": trap.Port, "tls_mode": "starttls", "username": "relay-user", "enabled": true}, http.StatusOK)
 		s.setPolicy("allow", "", e2eCorp)
 		mid := s.send(e2eCorp, e2eStranger)
-		rows := s.waitTerminal(mid)
+		rows := s.waitTerminalRows(mid, 2)
 		var corp *deliveryRow
 		for i := range rows {
 			if rows[i].Recipient == e2eCorp {
@@ -313,7 +304,7 @@ func TestEndToEndDeliveryNeverReachesRealRecipientsWhenMisconfigured(t *testing.
 		s.setTransport(control, true)
 		s.setPolicy("allow", "", e2eCorp)
 		mid := s.send(e2eCorp, e2eStranger)
-		rows := s.waitTerminal(mid)
+		rows := s.waitTerminalRows(mid, 2)
 		st := map[string]string{}
 		for _, r := range rows {
 			st[r.Recipient] = r.Status

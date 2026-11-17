@@ -31,13 +31,13 @@ WHERE m.project_id = $1
   AND ($5::text IS NULL OR m.subject ILIKE $5::text)
   AND ($6::text IS NULL OR EXISTS (
         SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id
-        WHERE mt.message_id = m.id AND t.name = $6::text))
+        WHERE mt.message_id = m.id AND lower(t.name) = lower($6::text)))
   AND ($7::text IS NULL
        OR EXISTS (SELECT 1 FROM jsonb_each(m.headers) h
                   WHERE lower(h.key) = 'x-run-id' AND h.value ? $7::text)
        OR EXISTS (SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id
                   WHERE mt.message_id = m.id
-                    AND t.name IN ($7::text, 'run:' || $7::text)))
+                    AND lower(t.name) IN (lower($7::text), lower('run:' || $7::text))))
   AND ($8::timestamptz IS NULL
        OR m.received_at >= $8::timestamptz)
   AND ($9::timestamptz IS NULL
@@ -47,8 +47,8 @@ WHERE m.project_id = $1
   AND ($11::text IS NULL
        OR m.search @@ websearch_to_tsquery('simple', $11::text)
        OR m.subject ILIKE $12::text)
-ORDER BY m.id ASC
-LIMIT $13::int
+ORDER BY CASE WHEN $13::bool THEN m.id END DESC, m.id ASC
+LIMIT $14::int
 `
 
 type MatchMessagesParams struct {
@@ -64,6 +64,7 @@ type MatchMessagesParams struct {
 	Body           pgtype.Text
 	Free           pgtype.Text
 	FreeLike       pgtype.Text
+	NewestFirst    bool
 	PageSize       int32
 }
 
@@ -80,8 +81,9 @@ type MatchMessagesRow struct {
 }
 
 // Messages for the long poll wait endpoint: the filters of ListMessages plus a
-// run filter (header X-Run-Id, tag equal to the run id or tag run:<id>) and an id floor,
-// oldest first so a poller can resume from the last id it saw.
+// run filter (header X-Run-Id, tag equal to the run id or tag run:<id>, tags compared
+// case-insensitively) and an id floor. Oldest first so a poller can resume from the
+// last id it saw, or newest first with newest_first (the latest matches).
 func (q *Queries) MatchMessages(ctx context.Context, arg MatchMessagesParams) ([]MatchMessagesRow, error) {
 	rows, err := q.db.Query(ctx, matchMessages,
 		arg.ProjectID,
@@ -96,6 +98,7 @@ func (q *Queries) MatchMessages(ctx context.Context, arg MatchMessagesParams) ([
 		arg.Body,
 		arg.Free,
 		arg.FreeLike,
+		arg.NewestFirst,
 		arg.PageSize,
 	)
 	if err != nil {

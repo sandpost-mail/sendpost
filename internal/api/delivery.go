@@ -2,7 +2,9 @@ package api
 
 import (
 	"errors"
+	"math"
 	"net/http"
+	"strconv"
 
 	"github.com/sandpost-mail/sandpost/internal/delivery"
 )
@@ -46,8 +48,18 @@ func (s *server) deleteTransport(w http.ResponseWriter, r *http.Request, c *call
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// testTransport answers 429 with Retry-After once the project used its
+// connection tests for the minute (the limit is kept by delivery.Service), so
+// the test can not be turned into a port scanner.
 func (s *server) testTransport(w http.ResponseWriter, r *http.Request, c *call) {
 	res, err := s.Delivery.TestTransport(r.Context(), c.scope)
+	var rl *delivery.RateLimitError
+	if errors.As(err, &rl) {
+		secs := max(1, int(math.Ceil(rl.RetryAfter.Seconds())))
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeErrorCode(w, http.StatusTooManyRequests, "too_many_attempts", "too many connection tests, try again later")
+		return
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return

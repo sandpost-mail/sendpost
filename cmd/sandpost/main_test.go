@@ -38,19 +38,20 @@ func TestRunDispatch(t *testing.T) {
 		{"help", []string{"help"}, nil, exitOK, "Usage:", ""},
 		{"unknown", []string{"bogus"}, nil, exitUsage, "", `unknown command "bogus"`},
 		{"admin help", []string{"admin"}, nil, exitOK, "Usage: sandpost admin", ""},
-		{"admin unknown task", []string{"admin", "x"}, nil, exitError, "", "unknown admin task"},
+		{"admin unknown task", []string{"admin", "x"}, nil, exitUsage, "", "unknown admin task"},
 		{"serve without config", []string{"serve"}, nil, exitError, "", "DATABASE_URL is required"},
 		{"migrate without config", []string{"migrate"}, nil, exitError, "", "DATABASE_URL is required"},
-		{"migrate bad direction", []string{"migrate", "sideways"}, nil, exitError, "", "unknown migrate direction"},
-		{"migrate too many args", []string{"migrate", "up", "x"}, nil, exitError, "", "usage:"},
+		{"migrate bad direction", []string{"migrate", "sideways"}, nil, exitUsage, "", "unknown migrate direction"},
+		{"migrate too many args", []string{"migrate", "up", "x"}, nil, exitUsage, "", "Usage: sandpost migrate"},
+		{"serve with an argument", []string{"serve", "now"}, nil, exitUsage, "", `unexpected argument "now"`},
 		{
 			"migrate unreachable db", []string{"migrate"},
-			map[string]string{"DATABASE_URL": "postgres://u:p@127.0.0.1:1/db?connect_timeout=1", "SECRET_KEY": testKey},
+			map[string]string{"DATABASE_URL": "postgres://u:p@127.0.0.1:1/db?connect_timeout=1", "SECRET_KEY": testKey}, //nolint:gosec // G101: fake test DSN
 			exitError, "", "ping database",
 		},
 		{
 			"serve unreachable db", []string{"serve"},
-			map[string]string{"DATABASE_URL": "postgres://u:p@127.0.0.1:1/db?connect_timeout=1", "SECRET_KEY": testKey},
+			map[string]string{"DATABASE_URL": "postgres://u:p@127.0.0.1:1/db?connect_timeout=1", "SECRET_KEY": testKey}, //nolint:gosec // G101: fake test DSN
 			exitError, "", "ping database",
 		},
 	}
@@ -77,7 +78,7 @@ func TestMigrateAndServe(t *testing.T) {
 
 	for _, step := range []struct{ arg, want string }{
 		{"status", "pending"},
-		{"up", "applied 16 migration(s)"},
+		{"up", "applied 17 migration(s)"},
 		{"status", "applied"},
 		{"down", "rolled back"},
 		{"up", "applied 1 migration(s)"},
@@ -91,32 +92,19 @@ func TestMigrateAndServe(t *testing.T) {
 		}
 	}
 
-	addr := freeAddr(t)
-	vars["HTTP_LISTEN"] = addr
-	vars["SMTP_LISTEN"] = freeAddr(t)
-	e, _, errb := testEnv(vars)
-	sctx, cancel := context.WithCancel(ctx)
-	done := make(chan int, 1)
-	go func() { done <- run(sctx, e, []string{"serve"}) }()
-
+	srv := startServe(t, vars)
 	for _, path := range []string{"/healthz", "/readyz"} {
-		if code := waitStatus(t, "http://"+addr+path); code != http.StatusOK {
+		if code := waitStatus(t, "http://"+srv.httpAddr+path); code != http.StatusOK {
 			t.Errorf("%s: got %d", path, code)
 		}
 	}
-	cancel()
-	select {
-	case code := <-done:
-		if code != exitOK {
-			t.Fatalf("serve exit %d stderr %q", code, errb)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("serve did not stop")
+	if code := srv.stop(); code != exitOK {
+		t.Fatalf("serve exit %d logs %q", code, srv.logs)
 	}
 }
 
 func TestServeListenError(t *testing.T) {
-	dsn := testutil.PostgresDSN(t)
+	dsn := testutil.MigratedDSN(t)
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +112,7 @@ func TestServeListenError(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 	e, _, errb := testEnv(map[string]string{
 		"DATABASE_URL": dsn, "SECRET_KEY": testKey, "HTTP_LISTEN": ln.Addr().String(),
-		"SMTP_LISTEN": freeAddr(t),
+		"SMTP_LISTEN": "127.0.0.1:0",
 	})
 	if code := run(context.Background(), e, []string{"serve"}); code != exitError {
 		t.Fatalf("code %d", code)
@@ -132,16 +120,6 @@ func TestServeListenError(t *testing.T) {
 	if !strings.Contains(errb.String(), "listen http") {
 		t.Errorf("stderr %q", errb)
 	}
-}
-
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-	return ln.Addr().String()
 }
 
 func waitStatus(t *testing.T, url string) int {

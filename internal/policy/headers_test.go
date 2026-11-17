@@ -1,6 +1,8 @@
 package policy_test
 
 import (
+	"fmt"
+	"mime"
 	"strings"
 	"testing"
 
@@ -72,6 +74,48 @@ func TestSenderSuppliedOriginalHeadersAreRemoved(t *testing.T) {
 	r := redirected(t, raw, "", []string{"real@corp.example"}, nil)
 	if strings.Contains(r, "forged") || !strings.Contains(r, "X-Original-To: real@corp.example\r\n") {
 		t.Errorf("redirected:\n%s", r)
+	}
+}
+
+func TestResentBccAndEveryOriginalHeaderAreRemoved(t *testing.T) {
+	raw := "From: a@x.test\r\nResent-Bcc: blind@x.test\r\nRESENT-BCC: blind2@x.test\r\nResent-To: shown@x.test\r\n" +
+		"X-Original-From: forged@x.test\r\nX-Original-Recipient: forged@x.test\r\nX-Original-Sender: forged@x.test\r\nSubject: s\r\n\r\nb"
+	for name, out := range map[string]string{"direct": direct(t, raw), "redirected": redirected(t, raw, "", []string{"real@corp.example"}, nil)} {
+		head, _, _ := strings.Cut(out, "\r\n\r\n")
+		if strings.Contains(head, "blind") || strings.Contains(head, "forged") {
+			t.Errorf("%s: blind or forged header survived:\n%s", name, head)
+		}
+		if !strings.Contains(head, "Resent-To: shown@x.test\r\n") {
+			t.Errorf("%s: Resent-To must be kept:\n%s", name, head)
+		}
+	}
+}
+
+func TestGeneratedHeadersAreFolded(t *testing.T) {
+	to := make([]string, 60)
+	for i := range to {
+		to[i] = fmt.Sprintf("recipient-number-%02d@some-long-domain.corp.example", i)
+	}
+	prefix := strings.Repeat("é", policy.MaxSubjectPrefixRunes)
+	out := redirected(t, "Subject: Hello\r\n\r\nb", prefix, to, nil)
+	head, _, _ := strings.Cut(out, "\r\n\r\n")
+	for _, line := range strings.Split(head, "\r\n") {
+		if len(line) > 78 {
+			t.Errorf("line of %d octets: %q", len(line), line)
+		}
+	}
+	unfolded := strings.ReplaceAll(head, "\r\n ", " ")
+	if !strings.Contains(unfolded, "recipient-number-49@") || strings.Contains(unfolded, "recipient-number-50@") ||
+		!strings.Contains(unfolded, "(10 more)") {
+		t.Errorf("X-Original-To must list 50 addresses and count the rest:\n%s", head)
+	}
+	if !strings.Contains(unfolded, "?= Hello") {
+		t.Errorf("original subject text lost:\n%s", head)
+	}
+	dec := new(mime.WordDecoder)
+	subject, _, _ := strings.Cut(unfolded[strings.Index(unfolded, "Subject: ")+len("Subject: "):], "\r\n")
+	if got, err := dec.DecodeHeader(subject); err != nil || got != prefix+"Hello" && got != prefix+" Hello" {
+		t.Errorf("subject decodes to %q (%v)", got, err)
 	}
 }
 

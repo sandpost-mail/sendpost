@@ -2,12 +2,18 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/sandpost-mail/sandpost/internal/config"
 	"github.com/sandpost-mail/sandpost/internal/store"
 )
+
+const usageMigrate = `Usage: sandpost migrate [up|down|status]
+
+  up       apply every pending migration (default)
+  down     roll back the most recent migration
+  status   list migrations and whether they are applied
+`
 
 func runMigrate(ctx context.Context, e env, args []string) error {
 	dir := "up"
@@ -16,10 +22,14 @@ func runMigrate(ctx context.Context, e env, args []string) error {
 	case 1:
 		dir = args[0]
 	default:
-		return errors.New("usage: sandpost migrate [up|down|status]")
+		return usageError("too many arguments\n\n%s", usageMigrate)
+	}
+	if isHelp(dir) {
+		_, _ = fmt.Fprint(e.stdout, usageMigrate)
+		return errHelpShown
 	}
 	if dir != "up" && dir != "down" && dir != "status" {
-		return fmt.Errorf("unknown migrate direction %q (want up, down or status)", dir)
+		return usageError("unknown migrate direction %q (want up, down or status)", dir)
 	}
 	cfg, err := config.Load(e.getenv)
 	if err != nil {

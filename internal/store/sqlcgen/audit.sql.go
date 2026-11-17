@@ -13,21 +13,23 @@ import (
 )
 
 const insertAudit = `-- name: InsertAudit :exec
-INSERT INTO audit_log (actor_user_id, project_id, action, target, detail)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO audit_log (actor_user_id, actor_token_id, project_id, action, target, detail)
+VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type InsertAuditParams struct {
-	ActorUserID pgtype.Int8
-	ProjectID   pgtype.Int8
-	Action      string
-	Target      string
-	Detail      []byte
+	ActorUserID  pgtype.Int8
+	ActorTokenID pgtype.Int8
+	ProjectID    pgtype.Int8
+	Action       string
+	Target       string
+	Detail       []byte
 }
 
 func (q *Queries) InsertAudit(ctx context.Context, arg InsertAuditParams) error {
 	_, err := q.db.Exec(ctx, insertAudit,
 		arg.ActorUserID,
+		arg.ActorTokenID,
 		arg.ProjectID,
 		arg.Action,
 		arg.Target,
@@ -37,7 +39,7 @@ func (q *Queries) InsertAudit(ctx context.Context, arg InsertAuditParams) error 
 }
 
 const listAudit = `-- name: ListAudit :many
-SELECT a.id, a.at, a.actor_user_id, COALESCE(u.email, '')::text AS actor_email,
+SELECT a.id, a.at, a.actor_user_id, COALESCE(u.email, '')::text AS actor_email, a.actor_token_id,
        a.project_id, a.action, a.target, a.detail
 FROM audit_log a LEFT JOIN users u ON u.id = a.actor_user_id
 WHERE ($1::bigint IS NULL OR a.project_id = $1::bigint)
@@ -53,14 +55,15 @@ type ListAuditParams struct {
 }
 
 type ListAuditRow struct {
-	ID          int64
-	At          time.Time
-	ActorUserID pgtype.Int8
-	ActorEmail  string
-	ProjectID   pgtype.Int8
-	Action      string
-	Target      string
-	Detail      []byte
+	ID           int64
+	At           time.Time
+	ActorUserID  pgtype.Int8
+	ActorEmail   string
+	ActorTokenID pgtype.Int8
+	ProjectID    pgtype.Int8
+	Action       string
+	Target       string
+	Detail       []byte
 }
 
 func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]ListAuditRow, error) {
@@ -77,6 +80,7 @@ func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]ListAud
 			&i.At,
 			&i.ActorUserID,
 			&i.ActorEmail,
+			&i.ActorTokenID,
 			&i.ProjectID,
 			&i.Action,
 			&i.Target,

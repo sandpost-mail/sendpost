@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"net/http"
 	"strings"
 
@@ -30,10 +29,6 @@ func (s *server) extractMessage(w http.ResponseWriter, r *http.Request, c *call)
 		return
 	}
 	codes, err := extract.Codes(d.Text, r.URL.Query().Get("code_pattern"))
-	if errors.Is(err, extract.ErrBadPattern) {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	if err != nil {
 		s.fail(w, r, err)
 		return

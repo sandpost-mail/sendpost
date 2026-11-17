@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -131,27 +132,48 @@ func TestWaitBlocksUntilAMatchingMessageArrives(t *testing.T) {
 	p, other := a.project("one"), a.project("two")
 	a.send(p.ID, "run-9", "old", "x")
 
-	done := make(chan waitResult, 1)
-	go func() {
-		var r waitResult
-		a.mustJSON(http.MethodGet, pp(p.ID, "/wait?timeout=20&run=run-9&count=2"), nil, http.StatusOK, &r)
-		done <- r
+	// The subscribe-before-query ordering and the wake up rules are covered
+	// deterministically by the messages.Waiter tests (testing/synctest).
+	// Here the sends race with the poll on purpose: whether they land before
+	// or after it subscribed, the answer must be the same.
+	type outcome struct {
+		status int
+		r      waitResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() { // no t.Fatal off the test goroutine: report through the channel
+		var o outcome
+		defer func() { done <- o }()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, a.srv.URL+pp(p.ID, "/wait?timeout=20&run=run-9&count=2"), nil)
+		if err != nil {
+			o.err = err
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+a.token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			o.err = err
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		o.status = resp.StatusCode
+		o.err = json.NewDecoder(resp.Body).Decode(&o.r)
 	}()
-	time.Sleep(300 * time.Millisecond)
 	a.send(other.ID, "run-9", "foreign", "x") // wakes nobody of this project
 	a.send(p.ID, "run-8", "other run", "x")   // wakes the poll, does not match
 	select {
-	case r := <-done:
-		t.Fatalf("returned too early: %+v", r)
-	case <-time.After(300 * time.Millisecond):
+	case o := <-done:
+		t.Fatalf("returned before a second match existed: %+v", o)
+	default:
 	}
 	want := a.send(p.ID, "run-9", "new", "x")
 	select {
-	case r := <-done:
-		if r.TimedOut || len(r.Messages) != 2 || r.Messages[1].ID != want {
-			t.Fatalf("got %+v", r)
+	case o := <-done:
+		if o.status != http.StatusOK || o.err != nil || o.r.TimedOut || len(o.r.Messages) != 2 || o.r.Messages[1].ID != want {
+			t.Fatalf("got %+v", o)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("wait did not wake up")
 	}
 }

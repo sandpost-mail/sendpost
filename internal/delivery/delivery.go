@@ -77,13 +77,17 @@ type Service struct {
 	box   *secrets.Box
 	relay Relay
 	queue Queue
+	// tests limits connection tests per project.
+	tests *windowLimiter
 }
 
-// NewService returns a Service. secretKey is the instance SECRET_KEY, relay
-// is used by the connection test, queue schedules releases (nil disables
-// release).
-func NewService(db store.DB, secretKey string, relay Relay, queue Queue) *Service {
-	return &Service{db: db, q: sqlcgen.New(db), box: secrets.New(secretKey), relay: relay, queue: queue}
+// NewService returns a Service. box encrypts relay passwords, relay is used
+// by the connection test, queue schedules releases (nil disables release).
+func NewService(db store.DB, box *secrets.Box, relay Relay, queue Queue) *Service {
+	return &Service{
+		db: db, q: sqlcgen.New(db), box: box, relay: relay, queue: queue,
+		tests: newWindowLimiter(maxTransportTests, transportTestWindow, time.Now),
+	}
 }
 
 func invalid(format string, args ...any) error {

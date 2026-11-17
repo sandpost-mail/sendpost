@@ -73,7 +73,7 @@ func NewService(db store.DB) *Service { return &Service{db: db} }
 
 // Create adds an account.
 func (s *Service) Create(ctx context.Context, in CreateInput) (User, error) {
-	email, err := normalizeEmail(in.Email)
+	email, err := NormalizeEmail(in.Email)
 	if err != nil {
 		return User{}, err
 	}
@@ -128,7 +128,11 @@ func (s *Service) Get(ctx context.Context, id int64) (User, error) {
 
 // GetByEmail returns the user with the given email, ignoring case.
 func (s *Service) GetByEmail(ctx context.Context, email string) (User, error) {
-	row, err := sqlcgen.New(s.db).GetUserForLogin(ctx, strings.TrimSpace(email))
+	email, err := NormalizeEmail(email)
+	if err != nil {
+		return User{}, ErrNotFound
+	}
+	row, err := sqlcgen.New(s.db).GetUserForLogin(ctx, email)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -156,42 +160,41 @@ func (s *Service) List(ctx context.Context) ([]User, error) {
 
 // Update changes a user. Demoting or disabling the last active administrator
 // fails with ErrLastAdmin. Disabling a user ends its sessions, and its tokens
-// stop working at once.
+// stop working at once. A request that changes nothing writes nothing and is
+// not audited.
 func (s *Service) Update(ctx context.Context, id int64, in UpdateInput) (User, error) {
-	p := sqlcgen.UpdateUserParams{ID: id}
-	detail := map[string]any{}
 	if in.Name != nil {
 		name := strings.TrimSpace(*in.Name)
 		if len([]rune(name)) > maxNameRunes {
 			return User{}, fmt.Errorf("%w: name is limited to %d characters", ErrInvalid, maxNameRunes)
 		}
-		p.Name = pgtype.Text{String: name, Valid: true}
-		detail["name"] = name
-	}
-	if in.IsAdmin != nil {
-		p.IsAdmin = pgtype.Bool{Bool: *in.IsAdmin, Valid: true}
-		detail["is_admin"] = *in.IsAdmin
-	}
-	if in.Disabled != nil {
-		p.Disabled = pgtype.Bool{Bool: *in.Disabled, Valid: true}
-		detail["disabled"] = *in.Disabled
+		in.Name = &name
 	}
 	var out User
 	err := store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
-		if err := guardLastAdmin(ctx, q, id, in); err != nil {
+		cur, err := q.GetUser(ctx, id)
+		if err != nil {
 			return err
 		}
-		row, err := q.UpdateUser(ctx, p)
+		change := changesOf(User(cur), in)
+		if change == (UpdateInput{}) {
+			out = User(cur)
+			return nil
+		}
+		if err := guardLastAdmin(ctx, q, id, change); err != nil {
+			return err
+		}
+		row, err := q.UpdateUser(ctx, updateParams(id, change))
 		if err != nil {
 			return err
 		}
 		out = User(row)
-		if in.Disabled != nil && *in.Disabled {
+		if change.Disabled != nil && *change.Disabled {
 			if err := q.DeleteUserSessions(ctx, id); err != nil {
 				return err
 			}
 		}
-		return audit.Record(ctx, q, audit.Entry{Action: "user.update", Target: userTarget(id), Detail: detail})
+		return audit.Record(ctx, q, audit.Entry{Action: "user.update", Target: userTarget(id), Detail: change.detail()})
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
@@ -203,6 +206,50 @@ func (s *Service) Update(ctx context.Context, id int64, in UpdateInput) (User, e
 		return User{}, fmt.Errorf("update user: %w", err)
 	}
 	return out, nil
+}
+
+// changesOf keeps the fields of in that differ from cur.
+func changesOf(cur User, in UpdateInput) UpdateInput {
+	var out UpdateInput
+	if in.Name != nil && *in.Name != cur.Name {
+		out.Name = in.Name
+	}
+	if in.IsAdmin != nil && *in.IsAdmin != cur.IsAdmin {
+		out.IsAdmin = in.IsAdmin
+	}
+	if in.Disabled != nil && *in.Disabled != (cur.DisabledAt != nil) {
+		out.Disabled = in.Disabled
+	}
+	return out
+}
+
+func updateParams(id int64, in UpdateInput) sqlcgen.UpdateUserParams {
+	p := sqlcgen.UpdateUserParams{ID: id}
+	if in.Name != nil {
+		p.Name = pgtype.Text{String: *in.Name, Valid: true}
+	}
+	if in.IsAdmin != nil {
+		p.IsAdmin = pgtype.Bool{Bool: *in.IsAdmin, Valid: true}
+	}
+	if in.Disabled != nil {
+		p.Disabled = pgtype.Bool{Bool: *in.Disabled, Valid: true}
+	}
+	return p
+}
+
+// detail is the audit detail of a change: the fields it sets.
+func (in UpdateInput) detail() map[string]any {
+	d := map[string]any{}
+	if in.Name != nil {
+		d["name"] = *in.Name
+	}
+	if in.IsAdmin != nil {
+		d["is_admin"] = *in.IsAdmin
+	}
+	if in.Disabled != nil {
+		d["disabled"] = *in.Disabled
+	}
+	return d
 }
 
 // guardLastAdmin refuses a change that would leave no active administrator.
@@ -222,8 +269,10 @@ func guardLastAdmin(ctx context.Context, q *sqlcgen.Queries, id int64, in Update
 	return nil
 }
 
-// ResetPassword sets a new password chosen by an administrator. The user must
-// change it at next login and all of its sessions end.
+// ResetPassword sets a new password chosen by an administrator, the account
+// recovery path. The user must change it at next login, all of its sessions
+// end and all of its API tokens are revoked, since a compromised account may
+// have minted some.
 func (s *Service) ResetPassword(ctx context.Context, id int64, newPassword string) error {
 	if err := ValidatePassword(newPassword); err != nil {
 		return err
@@ -243,7 +292,13 @@ func (s *Service) ResetPassword(ctx context.Context, id int64, newPassword strin
 		if err := q.DeleteUserSessions(ctx, id); err != nil {
 			return err
 		}
-		return audit.Record(ctx, q, audit.Entry{Action: "user.password_reset", Target: userTarget(id)})
+		revoked, err := q.RevokeAllUserTokens(ctx, pgtype.Int8{Int64: id, Valid: true})
+		if err != nil {
+			return err
+		}
+		return audit.Record(ctx, q, audit.Entry{
+			Action: "user.password_reset", Target: userTarget(id), Detail: map[string]any{"tokens_revoked": revoked},
+		})
 	})
 	if errors.Is(err, ErrNotFound) {
 		return err
@@ -256,7 +311,12 @@ func (s *Service) ResetPassword(ctx context.Context, id int64, newPassword strin
 
 // ChangePassword lets a user replace its own password. Every other session of
 // the user ends, keepSession (the caller's) stays. It clears
-// must_change_password.
+// must_change_password. API tokens are left alone: they are the user's
+// automation, listed and revocable on their own.
+//
+// The current password is verified inside the transaction, on the row locked
+// for update, so a concurrent administrator reset can not be overwritten
+// unseen.
 func (s *Service) ChangePassword(ctx context.Context, id int64, current, next string, keepSession []byte) error {
 	if err := ValidatePassword(next); err != nil {
 		return err
@@ -264,29 +324,39 @@ func (s *Service) ChangePassword(ctx context.Context, id int64, current, next st
 	if current == next {
 		return fmt.Errorf("%w: the new password must differ from the current one", ErrInvalid)
 	}
-	hash, err := sqlcgen.New(s.db).GetUserPasswordHash(ctx, id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("load password hash: %w", err)
-	}
-	if err := passwords.Verify(current, hash); err != nil {
-		if errors.Is(err, passwords.ErrMismatch) {
-			return ErrWrongPassword
-		}
-		return fmt.Errorf("verify password: %w", err)
-	}
 	newHash, err := passwords.Hash(next)
 	if err != nil {
 		return fmt.Errorf("hash password: %w", err)
 	}
 	err = store.InTx(ctx, s.db, func(q *sqlcgen.Queries) error {
-		if _, err := q.SetUserPassword(ctx, sqlcgen.SetUserPasswordParams{ID: id, PasswordHash: newHash}); err != nil {
+		hash, err := q.LockUserPasswordHash(ctx, id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("load password hash: %w", err)
+		}
+		if err := passwords.Verify(current, hash); err != nil {
+			if errors.Is(err, passwords.ErrMismatch) {
+				return ErrWrongPassword
+			}
+			return fmt.Errorf("verify password: %w", err)
+		}
+		n, err := q.SetUserPassword(ctx, sqlcgen.SetUserPasswordParams{ID: id, PasswordHash: newHash})
+		if err != nil {
 			return err
 		}
-		return q.DeleteUserSessionsExcept(ctx, sqlcgen.DeleteUserSessionsExceptParams{UserID: id, ID: keepSession})
+		if n != 1 {
+			return ErrNotFound
+		}
+		if err := q.DeleteUserSessionsExcept(ctx, sqlcgen.DeleteUserSessionsExceptParams{UserID: id, ID: keepSession}); err != nil {
+			return err
+		}
+		return audit.Record(ctx, q, audit.Entry{Action: "user.password_change", Target: userTarget(id)})
 	})
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrWrongPassword) {
+		return err
+	}
 	if err != nil {
 		return fmt.Errorf("change password: %w", err)
 	}
@@ -304,7 +374,11 @@ func ValidatePassword(p string) error {
 	return nil
 }
 
-func normalizeEmail(raw string) (string, error) {
+// NormalizeEmail is the one email rule of the instance, used to create
+// accounts (API, CLI and bootstrap) and to log in: surrounding space is
+// trimmed and the rest must be a plain address (no display name) of at most
+// 254 bytes. Case is kept as typed; lookups compare lower(email).
+func NormalizeEmail(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	addr, err := mail.ParseAddress(raw)
 	if err != nil || addr.Address != raw || len(raw) > maxEmailLength {

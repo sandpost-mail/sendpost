@@ -8,28 +8,32 @@ import (
 	"log/slog"
 	"net"
 	"net/mail"
-	"os"
+	"net/netip"
 	"strconv"
 	"strings"
 )
 
 // Defaults for optional settings.
 const (
-	DefaultSMTPListen            = ":1025"
-	DefaultHTTPListen            = ":8080"
-	DefaultMaxMessageBytes int64 = 25 << 20
-	minSecretKeyBytes            = 32
-	minAdminPasswordLength       = 12
-	configFileVar                = "SANDPOST_CONFIG_FILE"
-	logFormatText                = "text"
-	logFormatJSON                = "json"
+	DefaultSMTPListen               = ":1025"
+	DefaultHTTPListen               = ":8080"
+	DefaultMaxMessageBytes    int64 = 25 << 20
+	DefaultSMTPMaxConnections       = 100
+	minSecretKeyBytes               = 32
+	// minSecretKeyDistinct rejects obviously weak keys such as one repeated
+	// character. Any generated key (hex, base64) passes easily.
+	minSecretKeyDistinct   = 8
+	minAdminPasswordLength = 12
+	configFileVar          = "SANDPOST_CONFIG_FILE"
+	logFormatText          = "text"
+	logFormatJSON          = "json"
 )
 
 // SMTP TLS modes (SMTP_TLS_MODE).
 const (
 	// TLSOff serves plaintext SMTP only.
 	TLSOff = "off"
-	// TLSStartTLS offers STARTTLS, plaintext AUTH stays allowed.
+	// TLSStartTLS offers STARTTLS and refuses AUTH until it is active.
 	TLSStartTLS = "starttls"
 	// TLSRequired offers STARTTLS and refuses AUTH before TLS.
 	TLSRequired = "required"
@@ -56,6 +60,15 @@ type Config struct {
 	CookieSecure bool
 	LogLevel     slog.Level
 	LogFormat    string
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For header is
+	// believed when deriving the client address (TRUSTED_PROXIES). Empty
+	// trusts nobody.
+	TrustedProxies []netip.Prefix
+	// SMTPMaxConnections caps concurrent SMTP connections (SMTP_MAX_CONNECTIONS).
+	SMTPMaxConnections int
+	// RelayDenyCIDRs are networks the delivery relay must never connect to
+	// (RELAY_DENY_CIDRS). Empty denies nothing.
+	RelayDenyCIDRs []netip.Prefix
 }
 
 // LogValue implements slog.LogValuer and never exposes secrets.
@@ -70,6 +83,9 @@ func (c Config) LogValue() slog.Value {
 		slog.Bool("CookieSecure", c.CookieSecure),
 		slog.String("LogLevel", c.LogLevel.String()),
 		slog.String("LogFormat", c.LogFormat),
+		slog.Int("TrustedProxies", len(c.TrustedProxies)),
+		slog.Int("SMTPMaxConnections", c.SMTPMaxConnections),
+		slog.Int("RelayDenyCIDRs", len(c.RelayDenyCIDRs)),
 	)
 }
 
@@ -113,6 +129,8 @@ func build(get func(string) string) (Config, error) {
 		CookieSecure:    true,
 		LogLevel:        slog.LevelInfo,
 		LogFormat:       orDefault(strings.ToLower(get("LOG_FORMAT")), logFormatText),
+
+		SMTPMaxConnections: DefaultSMTPMaxConnections,
 	}
 
 	if c.DatabaseURL == "" {
@@ -123,6 +141,10 @@ func build(get func(string) string) (Config, error) {
 		errs = append(errs, errors.New("SECRET_KEY is required"))
 	case len(c.SecretKey) < minSecretKeyBytes:
 		errs = append(errs, fmt.Errorf("SECRET_KEY must be at least %d bytes", minSecretKeyBytes))
+	case distinctBytes(c.SecretKey) < minSecretKeyDistinct:
+		errs = append(errs, fmt.Errorf(
+			"SECRET_KEY is too repetitive (fewer than %d distinct characters), generate one with: openssl rand -hex 32",
+			minSecretKeyDistinct))
 	}
 	for _, kv := range [][2]string{{"SMTP_LISTEN", c.SMTPListen}, {"HTTP_LISTEN", c.HTTPListen}} {
 		if _, _, err := net.SplitHostPort(kv[1]); err != nil {
@@ -176,6 +198,24 @@ func build(get func(string) string) (Config, error) {
 	if c.LogFormat != logFormatText && c.LogFormat != logFormatJSON {
 		errs = append(errs, errors.New("LOG_FORMAT must be one of text, json"))
 	}
+	if raw := get("SMTP_MAX_CONNECTIONS"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("SMTP_MAX_CONNECTIONS is not an integer: %w", err))
+		case n <= 0:
+			errs = append(errs, errors.New("SMTP_MAX_CONNECTIONS must be positive"))
+		default:
+			c.SMTPMaxConnections = n
+		}
+	}
+	var err error
+	if c.TrustedProxies, err = parseCIDRs("TRUSTED_PROXIES", get("TRUSTED_PROXIES")); err != nil {
+		errs = append(errs, err)
+	}
+	if c.RelayDenyCIDRs, err = parseCIDRs("RELAY_DENY_CIDRS", get("RELAY_DENY_CIDRS")); err != nil {
+		errs = append(errs, err)
+	}
 
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration: %w", err)
@@ -200,42 +240,47 @@ func validateAdmin(c Config) []error {
 	return errs
 }
 
-func orDefault(v, def string) string {
-	if v == "" {
-		return def
+// parseCIDRs parses a comma separated list of CIDR prefixes. A bare address
+// is accepted as a single host prefix (/32 or /128).
+func parseCIDRs(name, raw string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
 	}
-	return v
-}
-
-// readFile parses a KEY=VALUE file. Blank lines and lines starting with # are
-// ignored, an optional "export " prefix is accepted, and values may be quoted.
-func readFile(path string) (map[string]string, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is operator-provided configuration
-	if err != nil {
-		return nil, fmt.Errorf("read config file: %w", err)
-	}
-	out := map[string]string{}
-	for i, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-		if line == "" || strings.HasPrefix(line, "#") {
+	var out []netip.Prefix
+	for item := range strings.SplitSeq(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
 			continue
 		}
-		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
-		key, val, ok := strings.Cut(line, "=")
-		key = strings.TrimSpace(key)
-		if !ok || key == "" {
-			return nil, fmt.Errorf("config file %s line %d: expected KEY=VALUE", path, i+1)
+		if p, err := netip.ParsePrefix(item); err == nil {
+			out = append(out, p.Masked())
+			continue
 		}
-		out[key] = unquote(strings.TrimSpace(val))
+		a, err := netip.ParseAddr(item)
+		if err != nil || a.Zone() != "" {
+			return nil, fmt.Errorf("%s: %q is not a CIDR prefix or IP address", name, item)
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
 	}
 	return out, nil
 }
 
-func unquote(v string) string {
-	if len(v) >= 2 {
-		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
-			return v[1 : len(v)-1]
+func distinctBytes(s string) int {
+	var seen [256]bool
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if !seen[s[i]] {
+			seen[s[i]] = true
+			n++
 		}
+	}
+	return n
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
 	}
 	return v
 }

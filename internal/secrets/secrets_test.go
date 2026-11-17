@@ -12,7 +12,7 @@ import (
 const key = "0123456789abcdef0123456789abcdef"
 
 func TestSealOpenRoundTrip(t *testing.T) {
-	box := secrets.New(key)
+	box := secrets.NewBox(secrets.MustDeriveKeys(key).Transport)
 	for _, plain := range []string{"", "hunter2", strings.Repeat("x", 4096), "pässwörd"} {
 		blob, err := box.Seal([]byte(plain), "transport:1")
 		if err != nil {
@@ -29,7 +29,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 }
 
 func TestSealIsRandomised(t *testing.T) {
-	box := secrets.New(key)
+	box := secrets.NewBox(secrets.MustDeriveKeys(key).Transport)
 	a, _ := box.Seal([]byte("same"), "ctx")
 	b, _ := box.Seal([]byte("same"), "ctx")
 	if bytes.Equal(a, b) {
@@ -38,7 +38,7 @@ func TestSealIsRandomised(t *testing.T) {
 }
 
 func TestOpenFailsClosed(t *testing.T) {
-	box := secrets.New(key)
+	box := secrets.NewBox(secrets.MustDeriveKeys(key).Transport)
 	blob, _ := box.Seal([]byte("secret"), "transport:1")
 	flipped := append([]byte(nil), blob...)
 	flipped[len(flipped)-1] ^= 1
@@ -51,7 +51,7 @@ func TestOpenFailsClosed(t *testing.T) {
 		blob []byte
 		aad  string
 	}{
-		{"wrong key", secrets.New("ffffffffffffffffffffffffffffffff"), blob, "transport:1"},
+		{"wrong key", secrets.NewBox(secrets.MustDeriveKeys("ffffffffffffffffffffffffffffffff").Transport), blob, "transport:1"},
 		{"wrong context", box, blob, "transport:2"},
 		{"tampered", box, flipped, "transport:1"},
 		{"unknown version", box, badVersion, "transport:1"},

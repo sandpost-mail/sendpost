@@ -5,8 +5,8 @@ import (
 	"strconv"
 )
 
-// auditParams reads the cursor and limit query parameters.
-func auditParams(w http.ResponseWriter, r *http.Request) (string, int, bool) {
+// pageParams reads the cursor and limit query parameters of a paginated list.
+func pageParams(w http.ResponseWriter, r *http.Request) (string, int, bool) {
 	limit := 0
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -20,7 +20,7 @@ func auditParams(w http.ResponseWriter, r *http.Request) (string, int, bool) {
 }
 
 func (s *server) listAudit(w http.ResponseWriter, r *http.Request, _ *call) {
-	cursor, limit, ok := auditParams(w, r)
+	cursor, limit, ok := pageParams(w, r)
 	if !ok {
 		return
 	}
@@ -33,7 +33,7 @@ func (s *server) listAudit(w http.ResponseWriter, r *http.Request, _ *call) {
 }
 
 func (s *server) listProjectAudit(w http.ResponseWriter, r *http.Request, c *call) {
-	cursor, limit, ok := auditParams(w, r)
+	cursor, limit, ok := pageParams(w, r)
 	if !ok {
 		return
 	}

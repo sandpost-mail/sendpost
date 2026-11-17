@@ -1,8 +1,11 @@
 package webui
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -19,7 +22,7 @@ func newFS() fstest.MapFS {
 
 func get(h http.Handler, method, path string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), method, path, nil))
 	return rec
 }
 
@@ -82,6 +85,58 @@ func TestNotBuilt(t *testing.T) {
 	rec := get(h, http.MethodGet, "/anything")
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "make web") {
 		t.Errorf("%d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestShellCSPHashesInlineScriptsLikeSvelteKit(t *testing.T) {
+	// testdata/sveltekit-index.html is a real `npm run build` output with
+	// kit.csp mode 'hash': the header must allow exactly the script the
+	// <meta> CSP allows, and never 'unsafe-inline' for scripts.
+	doc, err := os.ReadFile("testdata/sveltekit-index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := regexp.MustCompile(`'sha256-[^']+'`).FindString(string(doc))
+	if meta == "" {
+		t.Fatal("fixture has no meta CSP hash")
+	}
+	h := NewHandler(fstest.MapFS{"index.html": {Data: doc}})
+	csp := get(h, http.MethodGet, "/projects/1").Header().Get("Content-Security-Policy")
+	scriptSrc := ""
+	for _, d := range strings.Split(csp, ";") {
+		if d = strings.TrimSpace(d); strings.HasPrefix(d, "script-src ") {
+			scriptSrc = d
+		}
+	}
+	if scriptSrc != "script-src 'self' "+meta {
+		t.Fatalf("script-src %q, want the SvelteKit hash %s and no unsafe-inline", scriptSrc, meta)
+	}
+}
+
+func TestInlineScriptHashesSkipsExternalAndEmptyScripts(t *testing.T) {
+	doc := `<script src="/a.js"></script><script></script><script>x()</script>`
+	if got := inlineScriptHashes([]byte(doc)); strings.Count(got, "'sha256-") != 1 {
+		t.Fatalf("hashes %q, want exactly one", got)
+	}
+}
+
+func TestETagRevalidation(t *testing.T) {
+	h := NewHandler(newFS())
+	for _, p := range []string{"/", "/favicon.svg", "/_app/immutable/entry/app.js"} {
+		etag := get(h, http.MethodGet, p).Header().Get("ETag")
+		if etag == "" {
+			t.Fatalf("%s: no ETag", p)
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, p, nil)
+		req.Header.Set("If-None-Match", etag)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotModified || rec.Body.Len() != 0 {
+			t.Errorf("%s: revalidation got %d with %d bytes, want 304", p, rec.Code, rec.Body.Len())
+		}
+	}
+	if get(h, http.MethodGet, "/").Header().Get("ETag") == get(h, http.MethodGet, "/favicon.svg").Header().Get("ETag") {
+		t.Error("different files share an ETag")
 	}
 }
 

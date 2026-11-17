@@ -23,9 +23,9 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 
-	"github.com/sandpost-mail/sandpost/internal/config"
 	"github.com/sandpost-mail/sandpost/internal/credentials"
 	"github.com/sandpost-mail/sandpost/internal/ingest"
+	"github.com/sandpost-mail/sandpost/internal/ratelimit"
 )
 
 const (
@@ -240,7 +240,7 @@ func TestVerifierFailureIsTemporary(t *testing.T) {
 }
 
 func TestAuthFailureRateLimitPerIP(t *testing.T) {
-	h, _ := start(t, func(o *Options) { o.Limiter = NewFailureLimiter(3, time.Minute) })
+	h, _ := start(t, func(o *Options) { o.Limiter = ratelimit.New(3, time.Minute) })
 	for i := 0; i < 3; i++ {
 		c := dial(t, h.addr)
 		if err := c.Auth(sasl.NewPlainClient("", goodUser, "bad")); smtpCode(err) != 535 {
@@ -351,8 +351,8 @@ func TestTLSModes(t *testing.T) {
 	}
 	clientTLS := &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS12}
 
-	t.Run("starttls allows plaintext auth and upgrade", func(t *testing.T) {
-		h, _ := start(t, func(o *Options) { o.TLSMode, o.TLSConfig = config.TLSStartTLS, tlsCfg })
+	t.Run("starttls refuses auth until TLS is active", func(t *testing.T) {
+		h, _ := start(t, func(o *Options) { o.TLSMode, o.TLSConfig = TLSStartTLS, tlsCfg })
 		c, err := smtp.DialStartTLS(h.addr, clientTLS)
 		if err != nil {
 			t.Fatal(err)
@@ -365,13 +365,13 @@ func TestTLSModes(t *testing.T) {
 			t.Fatal(err)
 		}
 		plain := dial(t, h.addr)
-		if err := plain.Auth(sasl.NewPlainClient("", goodUser, goodPass)); err != nil {
-			t.Errorf("plaintext auth should work in starttls mode: %v", err)
+		if err := plain.Auth(sasl.NewPlainClient("", goodUser, goodPass)); smtpCode(err) != 523 {
+			t.Errorf("plaintext auth must be refused in starttls mode, got %v", err)
 		}
 	})
 
 	t.Run("required refuses auth before TLS", func(t *testing.T) {
-		h, _ := start(t, func(o *Options) { o.TLSMode, o.TLSConfig = config.TLSRequired, tlsCfg })
+		h, _ := start(t, func(o *Options) { o.TLSMode, o.TLSConfig = TLSRequired, tlsCfg })
 		plain := dial(t, h.addr)
 		if err := plain.Auth(sasl.NewPlainClient("", goodUser, goodPass)); smtpCode(err) != 523 {
 			t.Errorf("want 523, got %v", err)
@@ -387,7 +387,7 @@ func TestTLSModes(t *testing.T) {
 	})
 
 	t.Run("implicit", func(t *testing.T) {
-		h, _ := start(t, func(o *Options) { o.TLSMode, o.TLSConfig = config.TLSImplicit, tlsCfg })
+		h, _ := start(t, func(o *Options) { o.TLSMode, o.TLSConfig = TLSImplicit, tlsCfg })
 		c, err := smtp.DialTLS(h.addr, clientTLS)
 		if err != nil {
 			t.Fatal(err)
@@ -403,11 +403,30 @@ func TestTLSModes(t *testing.T) {
 }
 
 func TestNewValidatesOptions(t *testing.T) {
-	if _, err := New(Options{}); err == nil {
-		t.Error("missing dependencies must fail")
+	valid := func() Options {
+		return Options{Verifier: &fakeVerifier{}, Ingester: &fakeIngester{}, MaxMessageBytes: 1024}
 	}
-	if _, err := New(Options{Verifier: &fakeVerifier{}, Ingester: &fakeIngester{}, TLSMode: config.TLSRequired}); err == nil {
-		t.Error("TLS mode without config must fail")
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Options)
+	}{
+		{"missing dependencies", func(o *Options) { o.Verifier = nil }},
+		{"zero message size", func(o *Options) { o.MaxMessageBytes = 0 }},
+		{"negative message size", func(o *Options) { o.MaxMessageBytes = -1 }},
+		{"negative connections", func(o *Options) { o.MaxConnections = -1 }},
+		{"unknown TLS mode", func(o *Options) { o.TLSMode = "sometimes" }},
+		{"TLS mode without config", func(o *Options) { o.TLSMode = TLSRequired }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := valid()
+			tc.mutate(&opts)
+			if _, err := New(opts); err == nil {
+				t.Error("want an error")
+			}
+		})
+	}
+	if _, err := New(valid()); err != nil {
+		t.Errorf("valid options: %v", err)
 	}
 	if _, err := LoadTLS("/nonexistent", "/nonexistent"); err == nil {
 		t.Error("missing key pair must fail")
@@ -415,7 +434,7 @@ func TestNewValidatesOptions(t *testing.T) {
 }
 
 func TestServeReturnsListenerError(t *testing.T) {
-	srv, err := New(Options{Verifier: &fakeVerifier{}, Ingester: &fakeIngester{}})
+	srv, err := New(Options{Verifier: &fakeVerifier{}, Ingester: &fakeIngester{}, MaxMessageBytes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}

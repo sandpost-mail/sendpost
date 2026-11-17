@@ -12,7 +12,7 @@ func (s *server) compatRelease(w http.ResponseWriter, r *http.Request, c *compat
 		return
 	}
 	var body struct{ To []string }
-	if !compatBody(w, r, &body) {
+	if !compatBody(w, c, &body) {
 		return
 	}
 	if len(body.To) == 0 {

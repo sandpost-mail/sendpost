@@ -21,6 +21,54 @@ ORDER BY m.received_at DESC, m.id DESC
 OFFSET @row_offset::int
 LIMIT @row_limit::int;
 
+-- One page of a list or search together with the counts the Mailpit list
+-- envelope needs: the whole mailbox (total, unread) and the matches. The
+-- filter is evaluated once per message of the project (scored is
+-- materialized), and the per message sub-selects run for the page only.
+-- There is always one row: when the page is empty (no match, or an offset
+-- past the end) it carries the counts and id = 0.
+-- name: CompatListPage :many
+WITH scored AS MATERIALIZED (
+    SELECT m.id, m.received_at, m.read_at IS NULL AS unread,
+           (cardinality(@kinds::text[]) = 0 OR sp_filter_match(m.id, m.from_addr, m.subject, m.message_id_hdr, m.text_body, m.read_at, m.received_at, m.size_bytes, m.headers, @kinds::text[], @vals::text[], @negs::boolean[])) AS matched
+    FROM messages m
+    WHERE m.project_id = @project_id
+), totals AS (
+    SELECT count(*)::bigint AS mailbox_total,
+           (count(*) FILTER (WHERE s.unread))::bigint AS mailbox_unread,
+           (count(*) FILTER (WHERE s.matched))::bigint AS matches_total,
+           (count(*) FILTER (WHERE s.matched AND s.unread))::bigint AS matches_unread
+    FROM scored s
+), page AS (
+    SELECT s.id FROM scored s
+    WHERE s.matched
+    ORDER BY s.received_at DESC, s.id DESC
+    OFFSET @row_offset::int
+    LIMIT @row_limit::int
+)
+SELECT t.mailbox_total, t.mailbox_unread, t.matches_total, t.matches_unread,
+       COALESCE(m.id, 0)::bigint AS id,
+       COALESCE(m.received_at, 'epoch'::timestamptz)::timestamptz AS received_at,
+       COALESCE(m.message_id_hdr, '')::text AS message_id_hdr,
+       COALESCE(m.from_addr, '')::text AS from_addr,
+       COALESCE(m.subject, '')::text AS subject,
+       COALESCE(m.size_bytes, 0)::bigint AS size_bytes,
+       m.read_at,
+       COALESCE(m.headers, '{}'::jsonb)::jsonb AS headers,
+       COALESCE(left(m.text_body, 1000), '')::text AS text_head,
+       COALESCE(CASE WHEN m.text_body = '' THEN left(m.html_body, 4000) ELSE '' END, '')::text AS html_head,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object('kind', r.kind, 'address', r.address)
+                                  ORDER BY r.kind, r.address)
+                 FROM message_recipients r WHERE r.message_id = m.id), '[]'::jsonb)::jsonb AS recipients,
+       COALESCE((SELECT array_agg(g.name ORDER BY g.name)
+                 FROM message_tags mt JOIN tags g ON g.id = mt.tag_id
+                 WHERE mt.message_id = m.id), '{}')::text[] AS tag_names,
+       (SELECT count(*) FROM attachments a WHERE a.message_id = m.id AND NOT a.inline)::int AS attachment_count
+FROM totals t
+LEFT JOIN page p ON true
+LEFT JOIN messages m ON m.id = p.id
+ORDER BY m.received_at DESC NULLS LAST, m.id DESC NULLS LAST;
+
 -- name: CompatCountMessages :one
 SELECT count(*)::bigint AS total,
        (count(*) FILTER (WHERE m.read_at IS NULL))::bigint AS unread
