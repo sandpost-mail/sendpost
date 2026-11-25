@@ -1,0 +1,53 @@
+name: action-test
+
+# Smoke test of the composite action at the repository root (action.yml).
+on:
+  push:
+    branches: [main]
+    paths: [action.yml, .github/scripts/**, cmd/**, internal/**, go.mod, go.sum, .github/workflows/action-test.yml]
+  pull_request:
+    paths: [action.yml, .github/scripts/**, cmd/**, internal/**, go.mod, go.sum, .github/workflows/action-test.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: action-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: install puts the CLI on PATH
+        uses: ./
+        with:
+          command: install
+      - run: sandpost help
+
+      # Nothing listens on this port: the step must run the CLI and fail,
+      # which proves inputs reach the script and its exit code is propagated.
+      - name: wait against an unreachable server
+        id: unreachable
+        continue-on-error: true
+        uses: ./
+        with:
+          command: wait
+          server-url: http://127.0.0.1:9
+          project: "1"
+          token: not-a-real-token
+          timeout: "1"
+      - name: the failing wait failed the step
+        env:
+          OUTCOME: ${{ steps.unreachable.outcome }}
+        run: |
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "expected failure, got $OUTCOME"
+            exit 1
+          fi

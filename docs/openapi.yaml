@@ -1690,7 +1690,7 @@ components:
         at: { type: string, format: date-time }
         actor_user_id: { type: integer, format: int64, nullable: true }
         actor_email: { type: string }
-        actor_token_id: { type: integer, format: int64, nullable: true, description: API token the action was made with, null for sessions and system actions }
+        actor_token_id: { type: integer, format: int64, nullable: true, description: "API token the action was made with, null for sessions and system actions" }
         project_id: { type: integer, format: int64, nullable: true }
         action: { type: string, example: credential.create }
         target: { type: string, example: "credential:12" }
